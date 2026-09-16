@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>RA Agent Studio</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header><h1>RA Agent Studio</h1><p>Governed agent production workspace</p></header>
+  <nav>
+    <button data-view="library">Module Library</button>
+    <button data-view="lab">Module Lab</button>
+    <button data-view="sandbox">Effect Sandbox</button>
+    <button data-view="canvas">Agent Canvas</button>
+  </nav>
+  <main>
+    <section id="library" class="view active"><h2>Module Library</h2><div id="module-list"></div></section>
+    <section id="lab" class="view"><h2>Module Lab</h2><form id="module-form"><input name="module_id" placeholder="Module ID" required><input name="revision_id" placeholder="Revision ID" required><input name="name" placeholder="Name" required><textarea name="content" placeholder="Module content" required></textarea><button>Create revision</button></form><pre id="lab-result"></pre></section>
+    <section id="sandbox" class="view"><h2>Effect Sandbox</h2><p>Controlled observations only. Sandbox output has no approval, freeze or deployment authority.</p></section>
+    <section id="canvas" class="view"><h2>Agent Canvas</h2><p>Compose exact module revisions into a realized agent composition.</p></section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

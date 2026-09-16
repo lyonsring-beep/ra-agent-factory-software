@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+  web:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
