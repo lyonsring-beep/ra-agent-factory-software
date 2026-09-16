@@ -20,7 +20,7 @@ FACTORY_V111_COMMIT = "bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f"
 FACTORY_V111_CANDIDATE_SHA256 = "8387b7aa27d39be56a4f1e28ae979f9f233b1f29c196b5339c1b40dd6fdfec7b"
 FACTORY_V111_CANDIDATE_SIZE = 1089023
 FACTORY_V111_RUNTIME_IDENTITY = "ra-agent-factory-v1.11-frozen"
-FACTORY_V111_FROZEN_V8_EVIDENCE_SHA256 = "abb7faf63db08c00f6d2d94e5c336735285e803dccf0f7da92481a86501fc626"
+FACTORY_V111_FROZEN_PACKAGE_SHA256 = "df04ac7cc938be23d7652fa8424dd50f220ed95941c1e6290e689c04bbaceeaa"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,8 +51,8 @@ class SubprocessFactoryRuntime:
 
     Studio hands exact authoritative module bytes to a bridge that executes the frozen
     Factory source. Candidate-specific output bytes are hashed by Studio. Runtime-level
-    reproducibility is separately anchored to the exact accepted v1.11 V8 evidence identity;
-    the adapter never calls a string/hash formula a build and never invents reproducibility.
+    reproducibility is anchored to the exact accepted frozen V8 package digest plus the
+    exact v1.11 candidate identity; the adapter never simulates a Factory build.
     """
 
     def __init__(self, command: str, *, studio_db_path: str | None = None) -> None:
@@ -103,11 +103,11 @@ class SubprocessFactoryRuntime:
                 }
             )
         request = {
-            "contract": "ra-agent-studio/factory-v1.11-realize/v2",
+            "contract": "ra-agent-studio/factory-v1.11-realize/v3",
             "expected_factory_commit": FACTORY_V111_COMMIT,
             "expected_factory_candidate_sha256": FACTORY_V111_CANDIDATE_SHA256,
             "expected_factory_candidate_size": FACTORY_V111_CANDIDATE_SIZE,
-            "expected_factory_v8_evidence_sha256": FACTORY_V111_FROZEN_V8_EVIDENCE_SHA256,
+            "expected_factory_frozen_package_sha256": FACTORY_V111_FROZEN_PACKAGE_SHA256,
             "studio_composition_id": composition.composition_id,
             "studio_composition_hash": composition.composition_hash.value,
             "bindings": request_bindings,
@@ -136,8 +136,8 @@ class SubprocessFactoryRuntime:
                 raise RuntimeError("Factory runtime commit does not match frozen v1.11 identity")
             if factory_candidate_sha256 != FACTORY_V111_CANDIDATE_SHA256:
                 raise RuntimeError("Factory candidate hash does not match frozen v1.11 identity")
-            if response.get("factory_v8_evidence_sha256") != FACTORY_V111_FROZEN_V8_EVIDENCE_SHA256:
-                raise RuntimeError("Factory frozen V8 evidence identity mismatch")
+            if response.get("factory_frozen_package_sha256") != FACTORY_V111_FROZEN_PACKAGE_SHA256:
+                raise RuntimeError("Factory frozen V8 package identity mismatch")
             artifact_path = Path(response["artifact_path"])
             evidence_path = Path(response["evidence_path"])
             if not artifact_path.is_file() or not evidence_path.is_file():
