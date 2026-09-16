@@ -1,12 +1,13 @@
-name: Package RA Agent Studio implementation candidate
+name: Package RA Agent Studio implementation candidate v1.01
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [implementation-repair-v1_01]
     paths:
       - '.github/workflows/package_candidate.yml'
       - 'src/**'
+      - 'scripts/**'
       - 'tests/**'
       - 'frontend/**'
       - 'Dockerfile'
@@ -47,47 +48,60 @@ jobs:
 
       - name: Build production container
         run: |
-          docker build -t ra-agent-studio:candidate . | tee evidence/docker-build.txt
-          docker image inspect ra-agent-studio:candidate --format '{{.Id}}' | tee evidence/docker-image-id.txt
+          docker build -t ra-agent-studio:candidate-v1_01 . | tee evidence/docker-build.txt
+          docker image inspect ra-agent-studio:candidate-v1_01 --format '{{.Id}}' | tee evidence/docker-image-id.txt
 
-      - name: Record exact source identity
+      - name: Record exact source and repair evidence identities
         shell: bash
         run: |
           set -euo pipefail
           {
+            echo "candidate=RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01"
             echo "repository=lyonsring-beep/ra-agent-factory-software"
             echo "commit=${GITHUB_SHA}"
             echo "tree=$(git rev-parse HEAD^{tree})"
+            echo "branch=${GITHUB_REF_NAME}"
             echo "workflow_run_id=${GITHUB_RUN_ID}"
             echo "workflow_run_number=${GITHUB_RUN_NUMBER}"
             echo "python=$(python --version 2>&1)"
+            echo "prior_candidate_v1_00_sha256=0f55300cd69d9c8d43a8045fc0f66535fe0ea0befaea63143ea0b796e99743ff"
+            echo "factory_v1_11_commit=bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f"
+            echo "factory_v1_11_candidate_sha256=8387b7aa27d39be56a4f1e28ae979f9f233b1f29c196b5339c1b40dd6fdfec7b"
+            echo "factory_v1_11_frozen_package_sha256=df04ac7cc938be23d7652fa8424dd50f220ed95941c1e6290e689c04bbaceeaa"
+            echo "live_integration_run=35063339693"
+            echo "live_integration_job=104688177084"
+            echo "live_integration_artifact_id=10433845504"
+            echo "live_integration_artifact_sha256=4017f278bd618a142c60d06604e52cbfdbf7c4713ddcfe43383268a4cbab3164"
+            echo "live_factory_output_sha256=542e896d1b5e4c2577e20d155d26dbd0406b7924b6657acb1224dfcdab0d8c57"
+            echo "live_factory_evidence_sha256=1e373b008a921c16a4fb3b6247bc28a8ec6a00da4f3d202951ae87b5237c76ac"
+            echo "live_integration_record_sha256=ae8a7217673e42aa0125e390a702157cf36001899c0f76c61befc7ec5e1afa42"
           } > evidence/IMPLEMENTATION_IDENTITY.txt
           git ls-files | LC_ALL=C sort > evidence/source-files.txt
           git ls-files -s | LC_ALL=C sort > evidence/source-index.txt
           sha256sum evidence/source-files.txt evidence/source-index.txt > evidence/source-manifest.sha256
 
-      - name: Build exact review candidate archive
+      - name: Build exact v1.01 review candidate archive
         shell: bash
         run: |
           set -euo pipefail
-          ROOT=RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00
+          ROOT=RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01
           mkdir -p "$ROOT"
           git archive --format=tar HEAD | tar -x -C "$ROOT"
           mkdir -p "$ROOT/evidence/final_internal_acceptance"
           cp -a evidence/. "$ROOT/evidence/final_internal_acceptance/"
-          zip -X -r RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip "$ROOT" >/dev/null
-          unzip -t RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip | tee evidence/archive-integrity.txt
-          sha256sum RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.sha256
-          stat -c '%s' RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.size
+          zip -X -r RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01.zip "$ROOT" >/dev/null
+          unzip -t RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01.zip | tee evidence/archive-integrity.txt
+          sha256sum RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01.sha256
+          stat -c '%s' RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01.size
 
-      - name: Upload exact implementation candidate
+      - name: Upload exact v1.01 implementation candidate
         uses: actions/upload-artifact@v4
         with:
-          name: RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00
+          name: RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01
           path: |
-            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip
-            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.sha256
-            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.size
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01.zip
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01.sha256
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_01.size
             evidence/
           compression-level: 0
           if-no-files-found: error
