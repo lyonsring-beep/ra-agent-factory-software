@@ -2,110 +2,519 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+import os
 from uuid import uuid4
 
+from ra_agent_studio.domain.auth import AuthorityRegistry, AuthorityScope
+from ra_agent_studio.domain.candidate import CandidateRecord
 from ra_agent_studio.domain.composition import ModuleBinding, RealizedAgentComposition, realize_composition
-from ra_agent_studio.domain.effect import EffectFixture, TestObservation, evaluate_fixture
+from ra_agent_studio.domain.effect import EffectFixture, TestDelta, TestObservation, compare_observations, evaluate_fixture
 from ra_agent_studio.domain.evidence import BuildEvidence
 from ra_agent_studio.domain.governance import BaselineRecord, FreezeRecord, approve_deployment, designate_baseline, freeze_candidate
 from ra_agent_studio.domain.identity import BaselineId, CandidateId, ContentHash, DeploymentId, FrozenArtifactId, LineageId, ModuleId, RevisionId
 from ra_agent_studio.domain.module import ModuleRevision, ModuleRevisionState
-from ra_agent_studio.domain.review import ReviewRecord, ReviewVerdict, require_independent_reviewer
-from ra_agent_studio.infra.memory import InMemoryModuleRepository
+from ra_agent_studio.domain.review import ReviewBlocker, ReviewRecord, ReviewVerdict, create_review_record
+from ra_agent_studio.infra.execution import IsolatedPythonProcessExecutor
+from ra_agent_studio.infra.factory import FACTORY_V111_RUNTIME_IDENTITY, FactoryRuntime, SubprocessFactoryRuntime
+from ra_agent_studio.infra.sqlite import SQLiteStateStore
 
 
 class StudioService:
-    """Coherent application facade for the Studio implementation blocks.
+    """Authoritative Studio application service.
 
-    Backend state remains authoritative. UI/CLI/API are only command/query surfaces.
+    Durable SQLite records, server-owned authority grants and explicit transactional
+    transitions are authoritative. API/UI/CLI are command/query surfaces only.
     """
 
-    def __init__(self, modules: InMemoryModuleRepository | None = None) -> None:
-        self.modules = modules or InMemoryModuleRepository()
-        self.compositions: dict[str, RealizedAgentComposition] = {}
-        self.evidence: dict[str, BuildEvidence] = {}
-        self.reviews: dict[str, ReviewRecord] = {}
-        self.freezes: dict[str, FreezeRecord] = {}
-        self.baselines: dict[str, BaselineRecord] = {}
-        self.deployments: dict[str, object] = {}
+    def __init__(
+        self,
+        *,
+        db_path: str | None = None,
+        authority_registry: AuthorityRegistry | None = None,
+        factory_runtime: FactoryRuntime | None = None,
+        sandbox_executor: IsolatedPythonProcessExecutor | None = None,
+    ) -> None:
+        self.store = SQLiteStateStore(db_path or os.environ.get("RA_STUDIO_DB_PATH", "ra_agent_studio.db"))
+        self.authority = authority_registry or AuthorityRegistry.from_environment()
+        self.factory_runtime = factory_runtime
+        self.sandbox_executor = sandbox_executor or IsolatedPythonProcessExecutor()
 
-    def create_module_revision(self, *, module_id: str, revision_id: str, name: str, content: str, predecessor_revision_id: str | None = None) -> ModuleRevision:
-        revision = ModuleRevision.create(
-            ModuleId(module_id), RevisionId(revision_id), name=name, content=content,
-            predecessor_revision_id=RevisionId(predecessor_revision_id) if predecessor_revision_id else None,
+    @staticmethod
+    def _module_payload(item: ModuleRevision) -> dict:
+        return {
+            "module_id": item.module_id.value,
+            "revision_id": item.revision_id.value,
+            "content_hash": item.content_hash.value,
+            "name": item.name,
+            "content": item.content,
+            "author_principal_id": item.author_principal_id,
+            "state": item.state.value,
+            "predecessor_revision_id": item.predecessor_revision_id.value if item.predecessor_revision_id else None,
+            "provided_capabilities": list(item.provided_capabilities),
+            "required_capabilities": list(item.required_capabilities),
+            "required_module_ids": [x.value for x in item.required_module_ids],
+            "incompatible_module_ids": [x.value for x in item.incompatible_module_ids],
+            "identity_domain": item.identity_domain,
+            "config_json": item.config_json,
+            "config_hash": item.config_hash.value if item.config_hash else None,
+        }
+
+    @staticmethod
+    def _module_from(data: dict) -> ModuleRevision:
+        return ModuleRevision(
+            module_id=ModuleId(data["module_id"]),
+            revision_id=RevisionId(data["revision_id"]),
+            content_hash=ContentHash(data["content_hash"]),
+            name=data["name"],
+            content=data["content"],
+            author_principal_id=data.get("author_principal_id", "system"),
+            state=ModuleRevisionState(data["state"]),
+            predecessor_revision_id=RevisionId(data["predecessor_revision_id"]) if data.get("predecessor_revision_id") else None,
+            provided_capabilities=tuple(data.get("provided_capabilities", [])),
+            required_capabilities=tuple(data.get("required_capabilities", [])),
+            required_module_ids=tuple(ModuleId(x) for x in data.get("required_module_ids", [])),
+            incompatible_module_ids=tuple(ModuleId(x) for x in data.get("incompatible_module_ids", [])),
+            identity_domain=data.get("identity_domain", ""),
+            config_json=data.get("config_json", "{}"),
+            config_hash=ContentHash(data["config_hash"]) if data.get("config_hash") else None,
         )
-        self.modules.add(revision)
+
+    @staticmethod
+    def _composition_payload(item: RealizedAgentComposition) -> dict:
+        return {
+            "composition_id": item.composition_id,
+            "composition_hash": item.composition_hash.value,
+            "bindings": [
+                {
+                    "module_id": b.module_id.value,
+                    "revision_id": b.revision_id.value,
+                    "content_hash": b.content_hash.value,
+                    "provided_capabilities": list(b.provided_capabilities),
+                    "required_capabilities": list(b.required_capabilities),
+                    "required_module_ids": [x.value for x in b.required_module_ids],
+                    "incompatible_module_ids": [x.value for x in b.incompatible_module_ids],
+                    "identity_domain": b.identity_domain,
+                    "config_hash": b.config_hash.value if b.config_hash else None,
+                }
+                for b in item.bindings
+            ],
+        }
+
+    @staticmethod
+    def _composition_from(data: dict) -> RealizedAgentComposition:
+        bindings = tuple(
+            ModuleBinding(
+                module_id=ModuleId(b["module_id"]),
+                revision_id=RevisionId(b["revision_id"]),
+                content_hash=ContentHash(b["content_hash"]),
+                provided_capabilities=tuple(b.get("provided_capabilities", [])),
+                required_capabilities=tuple(b.get("required_capabilities", [])),
+                required_module_ids=tuple(ModuleId(x) for x in b.get("required_module_ids", [])),
+                incompatible_module_ids=tuple(ModuleId(x) for x in b.get("incompatible_module_ids", [])),
+                identity_domain=b.get("identity_domain", ""),
+                config_hash=ContentHash(b["config_hash"]) if b.get("config_hash") else None,
+            )
+            for b in data["bindings"]
+        )
+        return RealizedAgentComposition(data["composition_id"], bindings, ContentHash(data["composition_hash"]))
+
+    @staticmethod
+    def _candidate_payload(item: CandidateRecord) -> dict:
+        return {
+            "candidate_id": item.candidate_id.value,
+            "candidate_hash": item.candidate_hash.value,
+            "composition_id": item.composition_id,
+            "composition_hash": item.composition_hash.value,
+            "factory_evidence_id": item.factory_evidence_id,
+            "factory_runtime_commit": item.factory_runtime_commit,
+            "factory_candidate_sha256": item.factory_candidate_sha256,
+            "author_principal_id": item.author_principal_id,
+            "contributor_principal_ids": sorted(item.contributor_principal_ids),
+            "workspace_id": item.workspace_id,
+            "lineage_id": item.lineage_id.value,
+            "predecessor_baseline_id": item.predecessor_baseline_id.value if item.predecessor_baseline_id else None,
+        }
+
+    @staticmethod
+    def _candidate_from(data: dict) -> CandidateRecord:
+        return CandidateRecord(
+            candidate_id=CandidateId(data["candidate_id"]),
+            candidate_hash=ContentHash(data["candidate_hash"]),
+            composition_id=data["composition_id"],
+            composition_hash=ContentHash(data["composition_hash"]),
+            factory_evidence_id=data["factory_evidence_id"],
+            factory_runtime_commit=data["factory_runtime_commit"],
+            factory_candidate_sha256=data["factory_candidate_sha256"],
+            author_principal_id=data["author_principal_id"],
+            contributor_principal_ids=frozenset(data["contributor_principal_ids"]),
+            workspace_id=data["workspace_id"],
+            lineage_id=LineageId(data["lineage_id"]),
+            predecessor_baseline_id=BaselineId(data["predecessor_baseline_id"]) if data.get("predecessor_baseline_id") else None,
+        )
+
+    @staticmethod
+    def _review_payload(item: ReviewRecord) -> dict:
+        return {
+            "review_id": item.review_id,
+            "subject_candidate_id": item.subject_candidate_id.value,
+            "subject_hash": item.subject_hash.value,
+            "reviewer_principal_id": item.reviewer_principal_id,
+            "authority_grant_id": item.authority_grant_id,
+            "review_method": item.review_method,
+            "scope": item.scope,
+            "workspace_id": item.workspace_id,
+            "verdict": item.verdict.value,
+            "blockers": [{"blocker_id": b.blocker_id, "description": b.description, "closed": b.closed} for b in item.blockers],
+        }
+
+    @staticmethod
+    def _review_from(data: dict) -> ReviewRecord:
+        return ReviewRecord(
+            review_id=data["review_id"],
+            subject_candidate_id=CandidateId(data["subject_candidate_id"]),
+            subject_hash=ContentHash(data["subject_hash"]),
+            reviewer_principal_id=data["reviewer_principal_id"],
+            authority_grant_id=data["authority_grant_id"],
+            review_method=data["review_method"],
+            scope=data["scope"],
+            workspace_id=data["workspace_id"],
+            verdict=ReviewVerdict(data["verdict"]),
+            blockers=tuple(ReviewBlocker(**b) for b in data.get("blockers", [])),
+        )
+
+    @staticmethod
+    def _freeze_payload(item: FreezeRecord) -> dict:
+        return {
+            "frozen_artifact_id": item.frozen_artifact.id.value,
+            "source_candidate_id": item.frozen_artifact.source_candidate_id.value,
+            "candidate_hash": item.candidate_hash.value,
+            "review_id": item.review_id,
+            "lineage_id": item.lineage_id.value,
+            "predecessor_baseline_id": item.predecessor_baseline_id.value if item.predecessor_baseline_id else None,
+            "authority_grant_id": item.authority_grant_id,
+            "frozen_by_principal_id": item.frozen_by_principal_id,
+            "frozen_at": item.frozen_at.isoformat(),
+        }
+
+    @staticmethod
+    def _freeze_from(data: dict) -> FreezeRecord:
+        from ra_agent_studio.domain.authority import FrozenArtifact
+        return FreezeRecord(
+            frozen_artifact=FrozenArtifact(FrozenArtifactId(data["frozen_artifact_id"]), CandidateId(data["source_candidate_id"])),
+            candidate_hash=ContentHash(data["candidate_hash"]),
+            review_id=data["review_id"],
+            lineage_id=LineageId(data["lineage_id"]),
+            predecessor_baseline_id=BaselineId(data["predecessor_baseline_id"]) if data.get("predecessor_baseline_id") else None,
+            authority_grant_id=data["authority_grant_id"],
+            frozen_by_principal_id=data["frozen_by_principal_id"],
+            frozen_at=datetime.fromisoformat(data["frozen_at"]),
+        )
+
+    @staticmethod
+    def _baseline_payload(item: BaselineRecord) -> dict:
+        return {
+            "baseline_id": item.baseline_id.value,
+            "frozen_artifact_id": item.frozen_artifact_id.value,
+            "lineage_id": item.lineage_id.value,
+            "predecessor_baseline_id": item.predecessor_baseline_id.value if item.predecessor_baseline_id else None,
+            "authority_grant_id": item.authority_grant_id,
+            "promoted_by_principal_id": item.promoted_by_principal_id,
+            "promoted_at": item.promoted_at.isoformat(),
+        }
+
+    @staticmethod
+    def _baseline_from(data: dict) -> BaselineRecord:
+        return BaselineRecord(
+            baseline_id=BaselineId(data["baseline_id"]),
+            frozen_artifact_id=FrozenArtifactId(data["frozen_artifact_id"]),
+            lineage_id=LineageId(data["lineage_id"]),
+            predecessor_baseline_id=BaselineId(data["predecessor_baseline_id"]) if data.get("predecessor_baseline_id") else None,
+            authority_grant_id=data["authority_grant_id"],
+            promoted_by_principal_id=data["promoted_by_principal_id"],
+            promoted_at=datetime.fromisoformat(data["promoted_at"]),
+        )
+
+    def _audit(self, actor: str, action: str, kind: str, subject_id: str, metadata: dict) -> None:
+        self.store.append_audit(
+            event_id=f"audit-{uuid4().hex}",
+            actor_principal_id=actor,
+            action=action,
+            subject_kind=kind,
+            subject_id=subject_id,
+            metadata=metadata,
+            occurred_at=datetime.now(UTC),
+        )
+
+    def create_module_revision(
+        self,
+        *,
+        module_id: str,
+        revision_id: str,
+        name: str,
+        content: str,
+        actor_principal_id: str = "system",
+        predecessor_revision_id: str | None = None,
+        provided_capabilities: tuple[str, ...] = (),
+        required_capabilities: tuple[str, ...] = (),
+        required_module_ids: tuple[str, ...] = (),
+        incompatible_module_ids: tuple[str, ...] = (),
+        identity_domain: str = "",
+        config_json: str = "{}",
+    ) -> ModuleRevision:
+        revision = ModuleRevision.create(
+            ModuleId(module_id),
+            RevisionId(revision_id),
+            name=name,
+            content=content,
+            author_principal_id=actor_principal_id,
+            predecessor_revision_id=RevisionId(predecessor_revision_id) if predecessor_revision_id else None,
+            provided_capabilities=provided_capabilities,
+            required_capabilities=required_capabilities,
+            required_module_ids=tuple(ModuleId(x) for x in required_module_ids),
+            incompatible_module_ids=tuple(ModuleId(x) for x in incompatible_module_ids),
+            identity_domain=identity_domain,
+            config_json=config_json,
+        )
+        with self.store.transaction():
+            if predecessor_revision_id:
+                self.store.get("module", predecessor_revision_id)
+            self.store.add("module", revision_id, self._module_payload(revision))
+            self._audit(actor_principal_id, "module_revision_created", "module", revision_id, {"hash": revision.content_hash.value})
         return revision
 
-    def prepare_candidate(self, revision_id: str) -> ModuleRevision:
-        revision = self.modules.get(RevisionId(revision_id))
+    def get_module(self, revision_id: str) -> ModuleRevision:
+        return self._module_from(self.store.get("module", revision_id))
+
+    def list_modules(self) -> tuple[ModuleRevision, ...]:
+        return tuple(self._module_from(x) for x in self.store.list("module"))
+
+    def prepare_candidate(self, revision_id: str, *, actor_principal_id: str = "system") -> ModuleRevision:
+        revision = self.get_module(revision_id)
         candidate = replace(revision, state=ModuleRevisionState.CANDIDATE)
-        self.modules.replace(candidate)
+        with self.store.transaction():
+            self.store.put("module", revision_id, self._module_payload(candidate))
+            self._audit(actor_principal_id, "module_candidate_prepared", "module", revision_id, {})
         return candidate
 
     def run_effect_fixture(self, revision_id: str, fixture: EffectFixture) -> TestObservation:
-        revision = self.modules.get(RevisionId(revision_id))
-        # The sandbox runner is deliberately authority-free. This deterministic reference
-        # runner makes the module text and fixture input observable for acceptance testing.
-        output = f"{revision.content}\n{fixture.input_text}"
-        return evaluate_fixture(fixture, revision.revision_id, output)
+        revision = self.get_module(revision_id)
+        result = self.sandbox_executor.execute(revision, fixture.input_text)
+        return evaluate_fixture(
+            fixture,
+            revision.revision_id,
+            result.output_text,
+            executor_identity=result.executor_identity,
+        )
 
-    def compose(self, composition_id: str, revision_ids: list[str]) -> RealizedAgentComposition:
-        bindings = []
+    def compare_effect_fixture(self, before_revision_id: str, after_revision_id: str, fixture: EffectFixture) -> TestDelta:
+        before = self.run_effect_fixture(before_revision_id, fixture)
+        after = self.run_effect_fixture(after_revision_id, fixture)
+        return compare_observations(before, after)
+
+    def compose(self, composition_id: str, revision_ids: list[str], *, actor_principal_id: str = "system") -> RealizedAgentComposition:
+        bindings: list[ModuleBinding] = []
         for revision_id in revision_ids:
-            revision = self.modules.get(RevisionId(revision_id))
-            bindings.append(ModuleBinding(revision.module_id, revision.revision_id, revision.content_hash))
+            revision = self.get_module(revision_id)
+            bindings.append(
+                ModuleBinding(
+                    revision.module_id,
+                    revision.revision_id,
+                    revision.content_hash,
+                    revision.provided_capabilities,
+                    revision.required_capabilities,
+                    revision.required_module_ids,
+                    revision.incompatible_module_ids,
+                    revision.identity_domain,
+                    revision.config_hash,
+                )
+            )
         composition = realize_composition(composition_id, tuple(bindings))
-        self.compositions[composition_id] = composition
+        with self.store.transaction():
+            self.store.add("composition", composition_id, self._composition_payload(composition))
+            self._audit(actor_principal_id, "composition_realized", "composition", composition_id, {"hash": composition.composition_hash.value})
         return composition
 
-    def build(self, composition_id: str, *, runtime_identity: str = "ra-agent-factory-v1.11") -> BuildEvidence:
-        composition = self.compositions[composition_id]
-        artifact_hash = ContentHash.from_bytes((composition.composition_hash.value + runtime_identity).encode())
+    def build(
+        self,
+        composition_id: str,
+        *,
+        actor_principal_id: str,
+        workspace_id: str,
+        lineage_id: str,
+        predecessor_baseline_id: str | None = None,
+    ) -> tuple[BuildEvidence, CandidateRecord]:
+        self.authority.require_grant(actor_principal_id, AuthorityScope.BUILD, workspace_id=workspace_id)
+        composition = self._composition_from(self.store.get("composition", composition_id))
+        runtime = self.factory_runtime or SubprocessFactoryRuntime.from_environment()
+        result = runtime.realize(composition)
         evidence = BuildEvidence(
             evidence_id=f"evidence-{uuid4().hex}",
             composition_id=composition_id,
             composition_hash=composition.composition_hash,
-            artifact_hash=artifact_hash,
+            artifact_hash=result.artifact_hash,
             created_at=datetime.now(UTC),
-            reproducible=True,
-            runtime_identity=runtime_identity,
+            reproducible=result.reproducible,
+            runtime_identity=FACTORY_V111_RUNTIME_IDENTITY,
+            factory_runtime_commit=result.runtime_commit,
+            factory_candidate_sha256=result.factory_candidate_sha256,
+            factory_evidence_hash=result.factory_evidence_hash,
         )
-        self.evidence[evidence.evidence_id] = evidence
-        return evidence
+        contributors = {actor_principal_id}
+        for binding in composition.bindings:
+            contributors.add(self.get_module(binding.revision_id.value).author_principal_id)
+        candidate = CandidateRecord(
+            candidate_id=CandidateId(f"candidate-{result.artifact_hash.value[:24]}"),
+            candidate_hash=result.artifact_hash,
+            composition_id=composition_id,
+            composition_hash=composition.composition_hash,
+            factory_evidence_id=evidence.evidence_id,
+            factory_runtime_commit=result.runtime_commit,
+            factory_candidate_sha256=result.factory_candidate_sha256,
+            author_principal_id=actor_principal_id,
+            contributor_principal_ids=frozenset(contributors),
+            workspace_id=workspace_id,
+            lineage_id=LineageId(lineage_id),
+            predecessor_baseline_id=BaselineId(predecessor_baseline_id) if predecessor_baseline_id else None,
+        )
+        evidence_payload = {
+            "evidence_id": evidence.evidence_id,
+            "composition_id": evidence.composition_id,
+            "composition_hash": evidence.composition_hash.value,
+            "artifact_hash": evidence.artifact_hash.value,
+            "created_at": evidence.created_at.isoformat(),
+            "reproducible": evidence.reproducible,
+            "runtime_identity": evidence.runtime_identity,
+            "factory_runtime_commit": evidence.factory_runtime_commit,
+            "factory_candidate_sha256": evidence.factory_candidate_sha256,
+            "factory_evidence_hash": evidence.factory_evidence_hash.value,
+        }
+        with self.store.transaction():
+            if predecessor_baseline_id:
+                current = self.store.get_optional("current_baseline", lineage_id)
+                if current is None or current.get("baseline_id") != predecessor_baseline_id:
+                    raise PermissionError("build predecessor is not the current lineage baseline")
+            self.store.add("evidence", evidence.evidence_id, evidence_payload)
+            self.store.add("candidate", candidate.candidate_id.value, self._candidate_payload(candidate))
+            self._audit(actor_principal_id, "factory_build_completed", "candidate", candidate.candidate_id.value, {"candidate_hash": candidate.candidate_hash.value, "factory_commit": result.runtime_commit})
+        return evidence, candidate
 
-    def review(self, *, subject_id: str, author_id: str, reviewer_id: str, passed: bool) -> ReviewRecord:
-        require_independent_reviewer(author_id, reviewer_id)
-        record = ReviewRecord(
-            review_id=f"review-{uuid4().hex}",
-            subject_id=subject_id,
-            reviewer_id=reviewer_id,
-            verdict=ReviewVerdict.PASS if passed else ReviewVerdict.FAIL,
+    def review(
+        self,
+        *,
+        candidate_id: str,
+        reviewer_principal_id: str,
+        review_method: str,
+        passed: bool,
+        blockers: tuple[ReviewBlocker, ...] = (),
+    ) -> ReviewRecord:
+        candidate = self._candidate_from(self.store.get("candidate", candidate_id))
+        grant = self.authority.require_grant(
+            reviewer_principal_id,
+            AuthorityScope.REVIEW,
+            workspace_id=candidate.workspace_id,
+            review_method=review_method,
         )
-        self.reviews[record.review_id] = record
+        record = create_review_record(
+            review_id=f"review-{uuid4().hex}",
+            candidate=candidate,
+            reviewer_principal_id=reviewer_principal_id,
+            authority_grant=grant,
+            review_method=review_method,
+            verdict=ReviewVerdict.PASS if passed else ReviewVerdict.FAIL,
+            blockers=blockers,
+        )
+        with self.store.transaction():
+            self.store.add("review", record.review_id, self._review_payload(record))
+            self._audit(reviewer_principal_id, "review_recorded", "candidate", candidate_id, {"review_id": record.review_id, "verdict": record.verdict.value, "grant_id": grant.grant_id})
         return record
 
-    def freeze(self, *, candidate_id: str, candidate_hash: str, review_id: str) -> FreezeRecord:
-        frozen_id = FrozenArtifactId(f"frozen-{uuid4().hex}")
+    def freeze(self, *, candidate_id: str, review_id: str, actor_principal_id: str) -> FreezeRecord:
+        candidate = self._candidate_from(self.store.get("candidate", candidate_id))
+        review = self._review_from(self.store.get("review", review_id))
+        grant = self.authority.require_grant(actor_principal_id, AuthorityScope.FREEZE, workspace_id=candidate.workspace_id)
+        frozen_id = FrozenArtifactId(f"frozen-{candidate.candidate_hash.value[:24]}")
         record = freeze_candidate(
-            candidate_id=CandidateId(candidate_id),
-            candidate_hash=ContentHash(candidate_hash),
+            candidate=candidate,
             frozen_artifact_id=frozen_id,
-            review=self.reviews[review_id],
+            review=review,
+            authority_grant_id=grant.grant_id,
+            frozen_by_principal_id=actor_principal_id,
             frozen_at=datetime.now(UTC),
         )
-        self.freezes[frozen_id.value] = record
+        with self.store.transaction():
+            self.store.add("freeze", frozen_id.value, self._freeze_payload(record))
+            self._audit(actor_principal_id, "candidate_frozen", "freeze", frozen_id.value, {"candidate_id": candidate_id, "candidate_hash": candidate.candidate_hash.value, "review_id": review_id, "grant_id": grant.grant_id})
         return record
 
-    def create_baseline(self, *, baseline_id: str, lineage_id: str, frozen_artifact_id: str) -> BaselineRecord:
-        record = designate_baseline(
-            BaselineId(baseline_id), LineageId(lineage_id), self.freezes[frozen_artifact_id]
-        )
-        self.baselines[baseline_id] = record
+    def create_baseline(
+        self,
+        *,
+        baseline_id: str,
+        lineage_id: str,
+        frozen_artifact_id: str,
+        expected_predecessor_baseline_id: str | None,
+        actor_principal_id: str,
+    ) -> BaselineRecord:
+        freeze = self._freeze_from(self.store.get("freeze", frozen_artifact_id))
+        candidate = self._candidate_from(self.store.get("candidate", freeze.frozen_artifact.source_candidate_id.value))
+        grant = self.authority.require_grant(actor_principal_id, AuthorityScope.PROMOTE_BASELINE, workspace_id=candidate.workspace_id)
+        with self.store.transaction():
+            pointer = self.store.get_optional("current_baseline", lineage_id)
+            current = self._baseline_from(self.store.get("baseline", pointer["baseline_id"])) if pointer else None
+            record = designate_baseline(
+                baseline_id=BaselineId(baseline_id),
+                lineage_id=LineageId(lineage_id),
+                freeze=freeze,
+                current_baseline=current,
+                expected_predecessor_baseline_id=BaselineId(expected_predecessor_baseline_id) if expected_predecessor_baseline_id else None,
+                authority_grant_id=grant.grant_id,
+                promoted_by_principal_id=actor_principal_id,
+                promoted_at=datetime.now(UTC),
+            )
+            self.store.add("baseline", baseline_id, self._baseline_payload(record))
+            self.store.put("current_baseline", lineage_id, {"baseline_id": baseline_id})
+            self._audit(actor_principal_id, "baseline_promoted", "baseline", baseline_id, {"lineage_id": lineage_id, "frozen_artifact_id": frozen_artifact_id, "predecessor": expected_predecessor_baseline_id, "grant_id": grant.grant_id})
         return record
 
-    def deploy(self, *, deployment_id: str, frozen_artifact_id: str):
-        frozen = self.freezes[frozen_artifact_id].frozen_artifact
-        record = approve_deployment(DeploymentId(deployment_id), frozen)
-        self.deployments[deployment_id] = record
+    def deploy(self, *, deployment_id: str, frozen_artifact_id: str, actor_principal_id: str):
+        freeze = self._freeze_from(self.store.get("freeze", frozen_artifact_id))
+        candidate = self._candidate_from(self.store.get("candidate", freeze.frozen_artifact.source_candidate_id.value))
+        grant = self.authority.require_grant(actor_principal_id, AuthorityScope.DEPLOY, workspace_id=candidate.workspace_id)
+        with self.store.transaction():
+            pointer = self.store.get_optional("current_baseline", freeze.lineage_id.value)
+            if pointer is None:
+                raise PermissionError("lineage has no current baseline")
+            current = self._baseline_from(self.store.get("baseline", pointer["baseline_id"]))
+            record = approve_deployment(
+                deployment_id=DeploymentId(deployment_id),
+                freeze=freeze,
+                current_baseline=current,
+                authority_grant_id=grant.grant_id,
+                activated_by_principal_id=actor_principal_id,
+                activated_at=datetime.now(UTC),
+            )
+            payload = {
+                "deployment_id": record.id.value,
+                "artifact_id": record.artifact_id.value,
+                "lineage_id": record.lineage_id.value,
+                "baseline_id": record.baseline_id.value,
+                "authority_grant_id": record.authority_grant_id,
+                "activated_by_principal_id": record.activated_by_principal_id,
+                "activated_at": record.activated_at.isoformat(),
+            }
+            self.store.add("deployment", deployment_id, payload)
+            self._audit(actor_principal_id, "deployment_activated", "deployment", deployment_id, {"frozen_artifact_id": frozen_artifact_id, "baseline_id": current.baseline_id.value, "grant_id": grant.grant_id})
         return record
+
+    def snapshot(self) -> dict:
+        return {
+            "modules": self.store.list("module"),
+            "compositions": self.store.list("composition"),
+            "evidence": self.store.list("evidence"),
+            "candidates": self.store.list("candidate"),
+            "reviews": self.store.list("review"),
+            "freezes": self.store.list("freeze"),
+            "baselines": self.store.list("baseline"),
+            "deployments": self.store.list("deployment"),
+            "audit": self.store.list_audit(),
+        }
