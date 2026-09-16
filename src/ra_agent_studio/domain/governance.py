@@ -5,14 +5,14 @@ from datetime import datetime
 
 from .authority import DeploymentRecord, FrozenArtifact
 from .candidate import CandidateRecord
-from .identity import BaselineId, DeploymentId, FrozenArtifactId, LineageId
+from .identity import BaselineId, ContentHash, DeploymentId, FrozenArtifactId, LineageId
 from .review import ReviewRecord
 
 
 @dataclass(frozen=True, slots=True)
 class FreezeRecord:
     frozen_artifact: FrozenArtifact
-    candidate_hash: object
+    candidate_hash: ContentHash
     review_id: str
     lineage_id: LineageId
     predecessor_baseline_id: BaselineId | None
@@ -107,6 +107,8 @@ def approve_deployment(
         raise PermissionError("artifact is not the activation-time current baseline")
     if current_baseline.lineage_id != freeze.lineage_id:
         raise PermissionError("deployment lineage mismatch")
+    if activated_at.tzinfo is None:
+        raise ValueError("deployment activation timestamp must be timezone-aware")
     return DeploymentRecord(
         id=deployment_id,
         artifact_id=freeze.frozen_artifact.id,
