@@ -15,7 +15,12 @@ class BuildEvidence:
     created_at: datetime
     reproducible: bool
     runtime_identity: str
+    factory_runtime_commit: str
+    factory_candidate_sha256: str
+    factory_evidence_hash: ContentHash
 
     def __post_init__(self) -> None:
         if self.created_at.tzinfo is None:
             raise ValueError("evidence timestamp must be timezone-aware")
+        if not self.reproducible:
+            raise ValueError("build evidence cannot claim acceptance without reproducibility proof")
