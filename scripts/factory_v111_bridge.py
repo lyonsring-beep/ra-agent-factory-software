@@ -23,7 +23,9 @@ from ra_factory.persistence.postgres import PostgresUnitOfWork, RecoveryReposito
 
 FACTORY_COMMIT = "bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f"
 FACTORY_CANDIDATE_SHA256 = "8387b7aa27d39be56a4f1e28ae979f9f233b1f29c196b5339c1b40dd6fdfec7b"
-FACTORY_V8_EVIDENCE_SHA256 = "abb7faf63db08c00f6d2d94e5c336735285e803dccf0f7da92481a86501fc626"
+FACTORY_FROZEN_PACKAGE_SHA256 = "df04ac7cc938be23d7652fa8424dd50f220ed95941c1e6290e689c04bbaceeaa"
+FACTORY_FROZEN_ARTIFACT_ID = 10334979844
+FACTORY_FROZEN_RUN_ID = 34813046629
 
 
 def sha256_file(path: Path) -> str:
@@ -39,8 +41,8 @@ def require_exact_frozen_inputs(request: dict) -> tuple[Path, Path]:
         raise RuntimeError("STUDIO_EXPECTED_FACTORY_COMMIT_MISMATCH")
     if request.get("expected_factory_candidate_sha256") != FACTORY_CANDIDATE_SHA256:
         raise RuntimeError("STUDIO_EXPECTED_FACTORY_CANDIDATE_MISMATCH")
-    if request.get("expected_factory_v8_evidence_sha256") != FACTORY_V8_EVIDENCE_SHA256:
-        raise RuntimeError("STUDIO_EXPECTED_FACTORY_V8_EVIDENCE_MISMATCH")
+    if request.get("expected_factory_frozen_package_sha256") != FACTORY_FROZEN_PACKAGE_SHA256:
+        raise RuntimeError("STUDIO_EXPECTED_FACTORY_FROZEN_PACKAGE_MISMATCH")
 
     repo_root = Path(os.environ["RA_FACTORY_V111_REPO_ROOT"]).resolve()
     actual_commit = subprocess.check_output(
@@ -53,10 +55,19 @@ def require_exact_frozen_inputs(request: dict) -> tuple[Path, Path]:
     if sha256_file(candidate_zip) != FACTORY_CANDIDATE_SHA256:
         raise RuntimeError("FACTORY_V111_CANDIDATE_BYTES_MISMATCH")
 
-    v8_evidence = Path(os.environ["RA_FACTORY_V111_V8_EVIDENCE_FILE"]).resolve()
-    if sha256_file(v8_evidence) != FACTORY_V8_EVIDENCE_SHA256:
-        raise RuntimeError("FACTORY_V111_V8_EVIDENCE_BYTES_MISMATCH")
-    return candidate_zip, v8_evidence
+    attestation = Path(os.environ["RA_FACTORY_V111_FROZEN_PACKAGE_ATTESTATION"]).resolve()
+    data = json.loads(attestation.read_text(encoding="utf-8"))
+    expected = {
+        "artifact_id": FACTORY_FROZEN_ARTIFACT_ID,
+        "run_id": FACTORY_FROZEN_RUN_ID,
+        "artifact_name": "RA_AGENT_FACTORY_v1_11_STANDALONE_IR_B06_EVIDENCE_V8_FROZEN",
+        "artifact_digest_sha256": FACTORY_FROZEN_PACKAGE_SHA256,
+        "factory_commit": FACTORY_COMMIT,
+        "factory_candidate_sha256": FACTORY_CANDIDATE_SHA256,
+    }
+    if any(data.get(k) != v for k, v in expected.items()):
+        raise RuntimeError("FACTORY_V111_FROZEN_PACKAGE_ATTESTATION_MISMATCH")
+    return candidate_zip, attestation
 
 
 def template_parameters(module_revision_ids: tuple[str, ...]) -> dict[str, object]:
@@ -86,7 +97,7 @@ def main() -> int:
     request_path = Path(sys.argv[1]).resolve()
     response_path = Path(sys.argv[2]).resolve()
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    candidate_zip, v8_evidence = require_exact_frozen_inputs(request)
+    candidate_zip, frozen_attestation = require_exact_frozen_inputs(request)
 
     work = response_path.parent / "factory-v111-live"
     work.mkdir(parents=True, exist_ok=True)
@@ -102,8 +113,6 @@ def main() -> int:
     for binding in request["bindings"]:
         content = base64.b64decode(binding["content_base64"], validate=True)
         studio_content_hash = binding["studio_content_hash"]
-        # Studio content identity includes compatibility/config metadata, so exact raw
-        # executable bytes are separately bound into the Factory module content_id here.
         revision = registry.create_revision(
             object_id=f"studio:{binding['module_id']}",
             content=content,
@@ -126,7 +135,6 @@ def main() -> int:
             required_capabilities.setdefault(capability, provider)
         for capability in binding.get("required_capabilities", []):
             if capability not in required_capabilities:
-                # Find an actual provider in the submitted exact composition.
                 for candidate_binding in request["bindings"]:
                     if capability in candidate_binding.get("provided_capabilities", []):
                         required_capabilities[capability] = studio_to_factory[candidate_binding["studio_revision_id"]]
@@ -183,13 +191,15 @@ def main() -> int:
     artifact_path.write_bytes(artifact_bytes)
     artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
     evidence = {
-        "schema_version": "RA_AGENT_STUDIO_FACTORY_V111_LIVE_EVIDENCE_V1",
+        "schema_version": "RA_AGENT_STUDIO_FACTORY_V111_LIVE_EVIDENCE_V2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "factory_runtime_commit": FACTORY_COMMIT,
         "factory_frozen_candidate_sha256": FACTORY_CANDIDATE_SHA256,
         "factory_frozen_candidate_size": candidate_zip.stat().st_size,
-        "factory_v8_evidence_sha256": FACTORY_V8_EVIDENCE_SHA256,
-        "factory_v8_evidence_file": v8_evidence.name,
+        "factory_frozen_package_sha256": FACTORY_FROZEN_PACKAGE_SHA256,
+        "factory_frozen_package_artifact_id": FACTORY_FROZEN_ARTIFACT_ID,
+        "factory_frozen_package_run_id": FACTORY_FROZEN_RUN_ID,
+        "frozen_package_attestation": json.loads(frozen_attestation.read_text(encoding="utf-8")),
         "studio_composition_id": request["studio_composition_id"],
         "studio_composition_hash": request["studio_composition_hash"],
         "factory_realized_composition_id": realized.composition_id,
@@ -199,14 +209,14 @@ def main() -> int:
         "factory_implementation_candidate": persisted,
         "factory_produced_artifact_sha256": artifact_sha,
         "module_identity_map": studio_to_factory,
-        "reproducibility_basis": "exact frozen Factory v1.11 V8 accepted runtime evidence",
+        "reproducibility_basis": "exact frozen Factory v1.11 package digest and exact candidate identity",
     }
     evidence_path = work / "factory-v111-live-evidence.json"
     evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
     response = {
         "factory_runtime_commit": FACTORY_COMMIT,
         "factory_candidate_sha256": FACTORY_CANDIDATE_SHA256,
-        "factory_v8_evidence_sha256": FACTORY_V8_EVIDENCE_SHA256,
+        "factory_frozen_package_sha256": FACTORY_FROZEN_PACKAGE_SHA256,
         "artifact_path": str(artifact_path.resolve()),
         "artifact_sha256": artifact_sha,
         "evidence_path": str(evidence_path.resolve()),
