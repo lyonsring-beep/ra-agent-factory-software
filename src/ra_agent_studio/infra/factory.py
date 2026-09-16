@@ -6,13 +6,13 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import subprocess
 import tempfile
 from typing import Protocol
 
 from ra_agent_studio.domain.composition import RealizedAgentComposition
 from ra_agent_studio.domain.identity import ContentHash
-from ra_agent_studio.domain.module import ModuleRevision
 
 
 FACTORY_V111_COMMIT = "bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f"
@@ -41,27 +41,23 @@ class FactoryBuildResult:
 
 
 class FactoryRuntime(Protocol):
-    def realize(
-        self,
-        composition: RealizedAgentComposition,
-        modules: tuple[ModuleRevision, ...],
-    ) -> FactoryBuildResult: ...
+    def realize(self, composition: RealizedAgentComposition) -> FactoryBuildResult: ...
 
 
 class SubprocessFactoryRuntime:
-    """Adapter for the already-frozen RA Agent Factory v1.11 runtime.
+    """Adapter for the exact frozen RA Agent Factory v1.11 runtime.
 
-    The configured command receives two final arguments: request JSON path and result JSON
-    path. It must execute Factory realization/build, write the built artifact and Factory
-    evidence, and attest the exact frozen Factory identity. Studio independently verifies
-    exact Factory identities and hashes the produced bytes; a plain identity string is
-    insufficient.
+    The bridge command receives request JSON and response JSON paths. Studio resolves the
+    exact authoritative module bytes from its persistent state store, sends them to Factory,
+    independently checks the exact frozen Factory identity and hashes the artifact/evidence
+    bytes returned by Factory. There is no production simulation fallback.
     """
 
-    def __init__(self, command: str) -> None:
+    def __init__(self, command: str, *, studio_db_path: str | None = None) -> None:
         if not command.strip():
             raise ValueError("Factory v1.11 command must be configured")
         self.command = command
+        self.studio_db_path = studio_db_path or os.environ.get("RA_STUDIO_DB_PATH", "ra_agent_studio.db")
 
     @classmethod
     def from_environment(cls) -> "SubprocessFactoryRuntime":
@@ -72,26 +68,34 @@ class SubprocessFactoryRuntime:
             )
         return cls(command)
 
-    def realize(
-        self,
-        composition: RealizedAgentComposition,
-        modules: tuple[ModuleRevision, ...],
-    ) -> FactoryBuildResult:
-        exact_modules = {module.revision_id.value: module for module in modules}
+    def _load_exact_module_payload(self, revision_id: str) -> dict:
+        conn = sqlite3.connect(self.studio_db_path)
+        try:
+            row = conn.execute(
+                "SELECT payload FROM records WHERE kind='module' AND record_key=?",
+                (revision_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise RuntimeError(f"authoritative module revision not found: {revision_id}")
+        return json.loads(row[0])
+
+    def realize(self, composition: RealizedAgentComposition) -> FactoryBuildResult:
         request_bindings = []
         for binding in composition.bindings:
-            module = exact_modules.get(binding.revision_id.value)
-            if module is None:
-                raise RuntimeError(f"missing exact module payload for {binding.revision_id.value}")
-            if module.content_hash != binding.content_hash:
+            module = self._load_exact_module_payload(binding.revision_id.value)
+            if module["content_hash"] != binding.content_hash.value:
                 raise RuntimeError(f"module payload hash drift for {binding.revision_id.value}")
+            if module.get("config_hash") != (binding.config_hash.value if binding.config_hash else None):
+                raise RuntimeError(f"module config hash drift for {binding.revision_id.value}")
             request_bindings.append(
                 {
                     "module_id": binding.module_id.value,
-                    "revision_id": binding.revision_id.value,
-                    "content_hash": binding.content_hash.value,
+                    "studio_revision_id": binding.revision_id.value,
+                    "studio_content_hash": binding.content_hash.value,
                     "config_hash": binding.config_hash.value if binding.config_hash else None,
-                    "content_base64": base64.b64encode(module.content.encode("utf-8")).decode("ascii"),
+                    "content_base64": base64.b64encode(module["content"].encode("utf-8")).decode("ascii"),
                     "provided_capabilities": list(binding.provided_capabilities),
                     "required_capabilities": list(binding.required_capabilities),
                 }
@@ -101,8 +105,8 @@ class SubprocessFactoryRuntime:
             "expected_factory_commit": FACTORY_V111_COMMIT,
             "expected_factory_candidate_sha256": FACTORY_V111_CANDIDATE_SHA256,
             "expected_factory_candidate_size": FACTORY_V111_CANDIDATE_SIZE,
-            "composition_id": composition.composition_id,
-            "composition_hash": composition.composition_hash.value,
+            "studio_composition_id": composition.composition_id,
+            "studio_composition_hash": composition.composition_hash.value,
             "bindings": request_bindings,
         }
         with tempfile.TemporaryDirectory(prefix="ra-studio-factory-") as temp_dir:
