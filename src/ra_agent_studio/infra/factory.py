@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
+from typing import Protocol
+
+from ra_agent_studio.domain.composition import RealizedAgentComposition
+from ra_agent_studio.domain.identity import ContentHash
+
+
+FACTORY_V111_COMMIT = "bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f"
+FACTORY_V111_CANDIDATE_SHA256 = "8387b7aa27d39be56a4f1e28ae979f9f233b1f29c196b5339c1b40dd6fdfec7b"
+FACTORY_V111_CANDIDATE_SIZE = 1089023
+FACTORY_V111_RUNTIME_IDENTITY = "ra-agent-factory-v1.11-frozen"
+
+
+@dataclass(frozen=True, slots=True)
+class FactoryBuildResult:
+    artifact_hash: ContentHash
+    factory_evidence_hash: ContentHash
+    runtime_commit: str
+    factory_candidate_sha256: str
+    reproducible: bool
+    artifact_path: str
+    evidence_path: str
+
+
+class FactoryRuntime(Protocol):
+    def realize(self, composition: RealizedAgentComposition) -> FactoryBuildResult: ...
+
+
+class SubprocessFactoryRuntime:
+    """Adapter for the already-frozen RA Agent Factory v1.11 runtime.
+
+    The configured command receives two final arguments: request JSON path and result JSON
+    path. It must execute Factory realization/build, write the built artifact and Factory
+    evidence, and attest the exact frozen Factory identity. Studio independently verifies
+    those identities and hashes the produced bytes; a plain identity string is insufficient.
+    """
+
+    def __init__(self, command: str) -> None:
+        if not command.strip():
+            raise ValueError("Factory v1.11 command must be configured")
+        self.command = command
+
+    @classmethod
+    def from_environment(cls) -> "SubprocessFactoryRuntime":
+        command = os.environ.get("RA_FACTORY_V111_COMMAND", "")
+        if not command:
+            raise RuntimeError(
+                "RA_FACTORY_V111_COMMAND is required; Studio will not simulate Factory v1.11 builds"
+            )
+        return cls(command)
+
+    def realize(self, composition: RealizedAgentComposition) -> FactoryBuildResult:
+        request = {
+            "contract": "ra-agent-studio/factory-v1.11-realize/v1",
+            "expected_factory_commit": FACTORY_V111_COMMIT,
+            "expected_factory_candidate_sha256": FACTORY_V111_CANDIDATE_SHA256,
+            "expected_factory_candidate_size": FACTORY_V111_CANDIDATE_SIZE,
+            "composition_id": composition.composition_id,
+            "composition_hash": composition.composition_hash.value,
+            "bindings": [
+                {
+                    "module_id": binding.module_id.value,
+                    "revision_id": binding.revision_id.value,
+                    "content_hash": binding.content_hash.value,
+                    "config_hash": binding.config_hash.value if binding.config_hash else None,
+                }
+                for binding in composition.bindings
+            ],
+        }
+        with tempfile.TemporaryDirectory(prefix="ra-studio-factory-") as temp_dir:
+            temp = Path(temp_dir)
+            request_path = temp / "request.json"
+            response_path = temp / "response.json"
+            request_path.write_text(json.dumps(request, sort_keys=True), encoding="utf-8")
+            completed = subprocess.run(
+                [*shlex.split(self.command), str(request_path), str(response_path)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"Factory v1.11 realization failed ({completed.returncode}): {completed.stderr.strip()}"
+                )
+            if not response_path.exists():
+                raise RuntimeError("Factory v1.11 did not produce the required response manifest")
+            response = json.loads(response_path.read_text(encoding="utf-8"))
+            runtime_commit = response.get("factory_runtime_commit")
+            factory_candidate_sha256 = response.get("factory_candidate_sha256")
+            if runtime_commit != FACTORY_V111_COMMIT:
+                raise RuntimeError("Factory runtime commit does not match frozen v1.11 identity")
+            if factory_candidate_sha256 != FACTORY_V111_CANDIDATE_SHA256:
+                raise RuntimeError("Factory candidate hash does not match frozen v1.11 identity")
+            artifact_path = Path(response["artifact_path"])
+            evidence_path = Path(response["evidence_path"])
+            if not artifact_path.is_file() or not evidence_path.is_file():
+                raise RuntimeError("Factory response references missing artifact/evidence files")
+            artifact_hash = ContentHash.from_bytes(artifact_path.read_bytes())
+            evidence_hash = ContentHash.from_bytes(evidence_path.read_bytes())
+            rebuild_hash = response.get("rebuild_artifact_sha256")
+            reproducible = bool(response.get("reproducible")) and rebuild_hash == artifact_hash.value
+            if not reproducible:
+                raise RuntimeError("Factory build did not supply reproducibility proof for exact artifact bytes")
+            return FactoryBuildResult(
+                artifact_hash=artifact_hash,
+                factory_evidence_hash=evidence_hash,
+                runtime_commit=runtime_commit,
+                factory_candidate_sha256=factory_candidate_sha256,
+                reproducible=True,
+                artifact_path=str(artifact_path),
+                evidence_path=str(evidence_path),
+            )
