@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
-from .identity import CandidateId, DeploymentId, FrozenArtifactId
+from .identity import CandidateId, DeploymentId, FrozenArtifactId, LineageId, BaselineId
 
 
 class AuthorityAction(StrEnum):
@@ -11,6 +12,7 @@ class AuthorityAction(StrEnum):
     FREEZE = "freeze"
     PROMOTE = "promote"
     DEPLOY = "deploy"
+    BUILD = "build"
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,13 +31,18 @@ class FrozenArtifact:
 class DeploymentRecord:
     id: DeploymentId
     artifact_id: FrozenArtifactId
+    lineage_id: LineageId
+    baseline_id: BaselineId
+    authority_grant_id: str
+    activated_by_principal_id: str
+    activated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.activated_at.tzinfo is None:
+            raise ValueError("deployment activation timestamp must be timezone-aware")
 
 
 def require_deployable(artifact: object) -> FrozenArtifact:
-    """Deployment may only begin from an exact FrozenArtifact.
-
-    Review success and candidate approval do not grant deployment authority.
-    """
     if not isinstance(artifact, FrozenArtifact):
         raise PermissionError("only FrozenArtifact may enter the deployment path")
     return artifact
