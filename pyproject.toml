@@ -3,10 +3,17 @@ name = "ra-agent-studio"
 version = "0.1.0"
 description = "RA Agent Studio software implementation"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+  "fastapi>=0.116,<1",
+  "pydantic>=2.11,<3",
+  "uvicorn>=0.35,<1",
+]
 
 [project.optional-dependencies]
-test = ["pytest>=8.4,<9"]
+test = ["pytest>=8.4,<9", "httpx>=0.28,<1"]
+
+[project.scripts]
+ra-studio = "ra_agent_studio.cli:main"
 
 [build-system]
 requires = ["hatchling>=1.27,<2"]
