@@ -1,0 +1,94 @@
+name: Package RA Agent Studio implementation candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/package_candidate.yml'
+      - 'src/**'
+      - 'tests/**'
+      - 'frontend/**'
+      - 'Dockerfile'
+      - 'compose.yaml'
+      - 'pyproject.toml'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+jobs:
+  package-candidate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install package and test dependencies
+        run: python -m pip install -e '.[test]'
+
+      - name: Run complete tests with machine-readable evidence
+        run: |
+          mkdir -p evidence
+          python -m pytest -q --junitxml=evidence/pytest-junit.xml | tee evidence/pytest-output.txt
+
+      - name: Verify API import
+        run: |
+          python - <<'PY' | tee evidence/api-import.txt
+          from ra_agent_studio.api import app
+          print(type(app).__name__)
+          print('API_IMPORT_PASS')
+          PY
+
+      - name: Build production container
+        run: |
+          docker build -t ra-agent-studio:candidate . | tee evidence/docker-build.txt
+          docker image inspect ra-agent-studio:candidate --format '{{.Id}}' | tee evidence/docker-image-id.txt
+
+      - name: Record exact source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "repository=lyonsring-beep/ra-agent-factory-software"
+            echo "commit=${GITHUB_SHA}"
+            echo "tree=$(git rev-parse HEAD^{tree})"
+            echo "workflow_run_id=${GITHUB_RUN_ID}"
+            echo "workflow_run_number=${GITHUB_RUN_NUMBER}"
+            echo "python=$(python --version 2>&1)"
+          } > evidence/IMPLEMENTATION_IDENTITY.txt
+          git ls-files | LC_ALL=C sort > evidence/source-files.txt
+          git ls-files -s | LC_ALL=C sort > evidence/source-index.txt
+          sha256sum evidence/source-files.txt evidence/source-index.txt > evidence/source-manifest.sha256
+
+      - name: Build exact review candidate archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00
+          mkdir -p "$ROOT"
+          git archive --format=tar HEAD | tar -x -C "$ROOT"
+          mkdir -p "$ROOT/evidence/final_internal_acceptance"
+          cp -a evidence/. "$ROOT/evidence/final_internal_acceptance/"
+          zip -X -r RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip "$ROOT" >/dev/null
+          unzip -t RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip | tee evidence/archive-integrity.txt
+          sha256sum RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.sha256
+          stat -c '%s' RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.size
+
+      - name: Upload exact implementation candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00
+          path: |
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.zip
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.sha256
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_00.size
+            evidence/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 90
