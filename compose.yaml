@@ -1,6 +1,12 @@
 services:
   api:
     build: .
+    environment:
+      RA_STUDIO_DB_PATH: /data/ra_agent_studio.db
+      RA_STUDIO_AUTHORITY_CONFIG_JSON: ${RA_STUDIO_AUTHORITY_CONFIG_JSON:-}
+      RA_FACTORY_V111_COMMAND: ${RA_FACTORY_V111_COMMAND:-}
+    volumes:
+      - studio-data:/data
     ports:
       - "8000:8000"
   web:
@@ -11,3 +17,6 @@ services:
       - "8080:80"
     depends_on:
       - api
+
+volumes:
+  studio-data:
