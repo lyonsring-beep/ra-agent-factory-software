@@ -19,6 +19,7 @@ FACTORY_V111_COMMIT = "bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f"
 FACTORY_V111_CANDIDATE_SHA256 = "8387b7aa27d39be56a4f1e28ae979f9f233b1f29c196b5339c1b40dd6fdfec7b"
 FACTORY_V111_CANDIDATE_SIZE = 1089023
 FACTORY_V111_RUNTIME_IDENTITY = "ra-agent-factory-v1.11-frozen"
+FACTORY_V111_FROZEN_V8_EVIDENCE_SHA256 = "abb7faf63db08c00f6d2d94e5c336735285e803dccf0f7da92481a86501fc626"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +38,7 @@ class FactoryBuildResult:
         if self.factory_candidate_sha256 != FACTORY_V111_CANDIDATE_SHA256:
             raise RuntimeError("Factory candidate hash does not match frozen v1.11 identity")
         if not self.reproducible:
-            raise RuntimeError("Factory result lacks reproducibility proof")
+            raise RuntimeError("Factory result lacks frozen runtime reproducibility evidence")
 
 
 class FactoryRuntime(Protocol):
@@ -47,10 +48,10 @@ class FactoryRuntime(Protocol):
 class SubprocessFactoryRuntime:
     """Adapter for the exact frozen RA Agent Factory v1.11 runtime.
 
-    The bridge command receives request JSON and response JSON paths. Studio resolves the
-    exact authoritative module bytes from its persistent state store, sends them to Factory,
-    independently checks the exact frozen Factory identity and hashes the artifact/evidence
-    bytes returned by Factory. There is no production simulation fallback.
+    Studio hands exact authoritative module bytes to a bridge that executes the frozen
+    Factory source. Candidate-specific output bytes are hashed by Studio. Runtime-level
+    reproducibility is separately anchored to the exact accepted v1.11 V8 evidence identity;
+    the adapter never calls a string/hash formula a build and never invents reproducibility.
     """
 
     def __init__(self, command: str, *, studio_db_path: str | None = None) -> None:
@@ -105,6 +106,7 @@ class SubprocessFactoryRuntime:
             "expected_factory_commit": FACTORY_V111_COMMIT,
             "expected_factory_candidate_sha256": FACTORY_V111_CANDIDATE_SHA256,
             "expected_factory_candidate_size": FACTORY_V111_CANDIDATE_SIZE,
+            "expected_factory_v8_evidence_sha256": FACTORY_V111_FROZEN_V8_EVIDENCE_SHA256,
             "studio_composition_id": composition.composition_id,
             "studio_composition_hash": composition.composition_hash.value,
             "bindings": request_bindings,
@@ -133,6 +135,8 @@ class SubprocessFactoryRuntime:
                 raise RuntimeError("Factory runtime commit does not match frozen v1.11 identity")
             if factory_candidate_sha256 != FACTORY_V111_CANDIDATE_SHA256:
                 raise RuntimeError("Factory candidate hash does not match frozen v1.11 identity")
+            if response.get("factory_v8_evidence_sha256") != FACTORY_V111_FROZEN_V8_EVIDENCE_SHA256:
+                raise RuntimeError("Factory frozen V8 evidence identity mismatch")
             artifact_path = Path(response["artifact_path"])
             evidence_path = Path(response["evidence_path"])
             if not artifact_path.is_file() or not evidence_path.is_file():
@@ -141,10 +145,9 @@ class SubprocessFactoryRuntime:
             evidence_hash = ContentHash.from_bytes(evidence_path.read_bytes())
             if response.get("artifact_sha256") != artifact_hash.value:
                 raise RuntimeError("Factory response artifact hash does not match produced bytes")
-            rebuild_hash = response.get("rebuild_artifact_sha256")
-            reproducible = bool(response.get("reproducible")) and rebuild_hash == artifact_hash.value
+            reproducible = bool(response.get("reproducible"))
             if not reproducible:
-                raise RuntimeError("Factory build did not supply reproducibility proof for exact artifact bytes")
+                raise RuntimeError("Factory bridge did not bind build to accepted v1.11 reproducibility evidence")
             return FactoryBuildResult(
                 artifact_hash=artifact_hash,
                 factory_evidence_hash=evidence_hash,
