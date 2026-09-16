@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -148,12 +149,23 @@ class SubprocessFactoryRuntime:
             reproducible = bool(response.get("reproducible"))
             if not reproducible:
                 raise RuntimeError("Factory bridge did not bind build to accepted v1.11 reproducibility evidence")
+
+            durable_dir_raw = os.environ.get("RA_STUDIO_FACTORY_EVIDENCE_DIR")
+            durable_artifact_path = artifact_path
+            durable_evidence_path = evidence_path
+            if durable_dir_raw:
+                durable_dir = Path(durable_dir_raw).resolve()
+                durable_dir.mkdir(parents=True, exist_ok=True)
+                durable_artifact_path = durable_dir / f"factory-produced-{artifact_hash.value}.zip"
+                durable_evidence_path = durable_dir / f"factory-evidence-{evidence_hash.value}.json"
+                shutil.copy2(artifact_path, durable_artifact_path)
+                shutil.copy2(evidence_path, durable_evidence_path)
             return FactoryBuildResult(
                 artifact_hash=artifact_hash,
                 factory_evidence_hash=evidence_hash,
                 runtime_commit=runtime_commit,
                 factory_candidate_sha256=factory_candidate_sha256,
                 reproducible=True,
-                artifact_path=str(artifact_path),
-                evidence_path=str(evidence_path),
+                artifact_path=str(durable_artifact_path),
+                evidence_path=str(durable_evidence_path),
             )
