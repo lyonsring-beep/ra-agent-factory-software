@@ -25,6 +25,8 @@ def binding(
         tuple(ModuleId(x) for x in incompatible),
         identity_domain,
         ContentHash.from_bytes(b"{}"),
+        agent_requirement_ref="req-1",
+        agent_authority_boundary_ref="boundary-1",
     )
 
 
