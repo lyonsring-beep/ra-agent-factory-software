@@ -14,6 +14,7 @@ from ra_agent_studio.domain.governance import BaselineRecord, FreezeRecord, appr
 from ra_agent_studio.domain.identity import BaselineId, CandidateId, ContentHash, DeploymentId, FrozenArtifactId, LineageId, ModuleId, RevisionId
 from ra_agent_studio.domain.module import ModuleAuthorityClass, ModuleEditability, ModuleRevision, ModuleRevisionState, ModuleType
 from ra_agent_studio.domain.review import ReviewBlocker, ReviewRecord, ReviewVerdict, create_review_record
+from ra_agent_studio.domain.production import ProductionEvent, ProductionRunRecord, ProductionState, transition as transition_production
 from ra_agent_studio.infra.execution import IsolatedPythonProcessExecutor
 from ra_agent_studio.infra.factory import FACTORY_V111_RUNTIME_IDENTITY, FactoryRuntime, SubprocessFactoryRuntime
 from ra_agent_studio.infra.sqlite import SQLiteStateStore
@@ -191,6 +192,51 @@ class StudioService:
             lineage_id=LineageId(data["lineage_id"]),
             predecessor_baseline_id=BaselineId(data["predecessor_baseline_id"]) if data.get("predecessor_baseline_id") else None,
         )
+
+    @staticmethod
+    def _production_payload(item: ProductionRunRecord) -> dict:
+        return {
+            "production_run_id": item.production_run_id,
+            "current_state": item.current_state.value,
+            "consistency_version": item.consistency_version,
+            "recovery_epoch": item.recovery_epoch,
+            "exact_candidate_id": item.exact_candidate_id,
+            "upstream_handoff_ref": item.upstream_handoff_ref,
+            "last_transition_ref": item.last_transition_ref,
+        }
+
+    @staticmethod
+    def _production_from(data: dict) -> ProductionRunRecord:
+        return ProductionRunRecord(
+            production_run_id=data["production_run_id"],
+            current_state=ProductionState(data["current_state"]),
+            consistency_version=int(data["consistency_version"]),
+            recovery_epoch=int(data["recovery_epoch"]),
+            exact_candidate_id=data["exact_candidate_id"],
+            upstream_handoff_ref=data["upstream_handoff_ref"],
+            last_transition_ref=data.get("last_transition_ref", ""),
+        )
+
+    def _transition_production(self, run: ProductionRunRecord, event: ProductionEvent, actor: str) -> ProductionRunRecord:
+        if run.recovery_epoch != self.store.recovery_epoch():
+            raise PermissionError("STALE_RECOVERY_EPOCH")
+        transition_ref=f"production-transition-{uuid4().hex}"
+        updated=transition_production(run,event,transition_ref=transition_ref)
+        self.store.put("production_run",run.production_run_id,self._production_payload(updated))
+        self.store.add_immutable("production_transition",transition_ref,{
+            "production_run_id":run.production_run_id,
+            "from_state":run.current_state.value,
+            "event":event.value,
+            "to_state":updated.current_state.value,
+            "prior_transition_ref":run.last_transition_ref,
+            "consistency_version":updated.consistency_version,
+            "recovery_epoch":updated.recovery_epoch,
+        })
+        self._audit(actor,"production_transition","production_run",run.production_run_id,{
+            "from_state":run.current_state.value,"event":event.value,"to_state":updated.current_state.value,
+            "transition_ref":transition_ref,"consistency_version":updated.consistency_version,
+        })
+        return updated
 
     @staticmethod
     def _review_payload(item: ReviewRecord) -> dict:
@@ -404,6 +450,7 @@ class StudioService:
         workspace_id: str,
         lineage_id: str,
         predecessor_baseline_id: str | None = None,
+        upstream_handoff_ref: str = "RA_AGENT_STUDIO_FORMAL_SOFTWARE_DESIGN_FROZEN_HANDOFF",
     ) -> tuple[BuildEvidence, CandidateRecord]:
         self.authority.require_grant(actor_principal_id, AuthorityScope.BUILD, workspace_id=workspace_id)
         composition = self._composition_from(self.store.get("composition", composition_id))
@@ -480,7 +527,24 @@ class StudioService:
                 "factory_runtime_commit": candidate.factory_runtime_commit,
                 "factory_candidate_sha256": candidate.factory_candidate_sha256,
             })
-            self._audit(actor_principal_id, "factory_build_completed", "candidate", candidate.candidate_id.value, {"candidate_hash": candidate.candidate_hash.value, "factory_commit": result.runtime_commit})
+            production_run_id=f"production-run:{candidate.candidate_id.value}"
+            initial=ProductionRunRecord(
+                production_run_id=production_run_id,
+                current_state=ProductionState.PR_08_IMPLEMENTATION_IN_PROGRESS,
+                consistency_version=0,
+                recovery_epoch=self.store.recovery_epoch(),
+                exact_candidate_id=candidate.candidate_id.value,
+                upstream_handoff_ref=upstream_handoff_ref,
+            )
+            self.store.add("production_run",production_run_id,self._production_payload(initial))
+            self.store.add_immutable("production_prerequisite",f"{production_run_id}:handoff",{
+                "kind":"IMPLEMENTATION_HANDOFF",
+                "upstream_handoff_ref":upstream_handoff_ref,
+                "standing":"VALID",
+                "authority_basis":"Frozen Studio Formal Software Design / Implementation Handoff",
+            })
+            self._transition_production(initial,ProductionEvent.IMPLEMENTATION_CANDIDATE_READY,actor_principal_id)
+            self._audit(actor_principal_id, "factory_build_completed", "candidate", candidate.candidate_id.value, {"candidate_hash": candidate.candidate_hash.value, "factory_commit": result.runtime_commit, "production_run_id": production_run_id})
         return evidence, candidate
 
     def review(
@@ -493,6 +557,10 @@ class StudioService:
         blockers: tuple[ReviewBlocker, ...] = (),
     ) -> ReviewRecord:
         candidate = self._candidate_from(self.store.get("candidate", candidate_id))
+        production_run_id=f"production-run:{candidate_id}"
+        run=self._production_from(self.store.get("production_run",production_run_id))
+        if run.current_state is not ProductionState.PR_09_IMPLEMENTATION_CANDIDATE:
+            raise PermissionError(f"review submission requires PR-09, got {run.current_state.value}")
         grant = self.authority.require_grant(
             reviewer_principal_id,
             AuthorityScope.REVIEW,
@@ -510,13 +578,33 @@ class StudioService:
             blockers=blockers,
         )
         with self.store.transaction():
+            run=self._production_from(self.store.get("production_run",production_run_id))
+            run=self._transition_production(run,ProductionEvent.IMPLEMENTATION_REVIEW_SUBMITTED,reviewer_principal_id)
             self.store.add("review", record.review_id, self._review_payload(record))
-            self._audit(reviewer_principal_id, "review_recorded", "candidate", candidate_id, {"review_id": record.review_id, "verdict": record.verdict.value, "grant_id": grant.grant_id})
+            self.store.add_immutable("review_admission",record.review_id,{
+                "exact_target_ref":candidate.factory_candidate_revision_id or candidate.candidate_id.value,
+                "studio_candidate_id":candidate.candidate_id.value,
+                "subject_hash":candidate.candidate_hash.value,
+                "reviewer_principal_id":record.reviewer_principal_id,
+                "reviewer_workspace_id":record.reviewer_workspace_id,
+                "standing":"REVIEW_ADMISSIBLE",
+                "independence_standing":"INDEPENDENT",
+                "review_scope_ref":candidate.factory_candidate_revision_id or candidate.candidate_id.value,
+                "authority_grant_id":record.authority_grant_id,
+                "authority_source":record.authority_source,
+            })
+            if record.verdict is ReviewVerdict.PASS:
+                run=self._transition_production(run,ProductionEvent.IMPLEMENTATION_REVIEW_PASS,reviewer_principal_id)
+            self._audit(reviewer_principal_id, "review_recorded", "candidate", candidate_id, {"review_id": record.review_id, "verdict": record.verdict.value, "grant_id": grant.grant_id, "production_state":run.current_state.value})
         return record
 
     def freeze(self, *, candidate_id: str, review_id: str, actor_principal_id: str) -> FreezeRecord:
         candidate = self._candidate_from(self.store.get("candidate", candidate_id))
         review = self._review_from(self.store.get("review", review_id))
+        production_run_id=f"production-run:{candidate_id}"
+        run=self._production_from(self.store.get("production_run",production_run_id))
+        if run.current_state is not ProductionState.PR_15_IMPLEMENTATION_APPROVED:
+            raise PermissionError(f"freeze requires PR-15 implementation approved, got {run.current_state.value}")
         if not candidate.artifact_blob_hash or not candidate.logical_payload_identity or not candidate.manifest_identity:
             raise PermissionError("candidate lacks exact B09 closure identities")
         immutable = self.store.get_immutable("candidate_closure", candidate.candidate_id.value)
@@ -538,6 +626,7 @@ class StudioService:
         with self.store.transaction():
             self.store.add("freeze", frozen_id.value, self._freeze_payload(record))
             self.store.add_immutable("freeze_closure", frozen_id.value, {
+                "production_run_id": production_run_id,
                 "candidate_id": candidate_id,
                 "candidate_hash": candidate.candidate_hash.value,
                 "artifact_blob_hash": candidate.artifact_blob_hash.value,
@@ -545,7 +634,9 @@ class StudioService:
                 "manifest_identity": candidate.manifest_identity.value,
                 "review_id": review_id,
             })
-            self._audit(actor_principal_id, "candidate_frozen", "freeze", frozen_id.value, {"candidate_id": candidate_id, "candidate_hash": candidate.candidate_hash.value, "review_id": review_id, "grant_id": grant.grant_id})
+            run=self._production_from(self.store.get("production_run",production_run_id))
+            run=self._transition_production(run,ProductionEvent.IMPLEMENTATION_FROZEN_ACCEPTED,actor_principal_id)
+            self._audit(actor_principal_id, "candidate_frozen", "freeze", frozen_id.value, {"candidate_id": candidate_id, "candidate_hash": candidate.candidate_hash.value, "review_id": review_id, "grant_id": grant.grant_id, "production_state":run.current_state.value})
         return record
 
     def create_baseline(
@@ -592,7 +683,12 @@ class StudioService:
                 "pointer_version": version,
                 "recovery_epoch": self.store.recovery_epoch(),
             })
-            self._audit(actor_principal_id, "baseline_promoted", "baseline", baseline_id, {"lineage_id": lineage_id, "frozen_artifact_id": frozen_artifact_id, "predecessor": expected_predecessor_baseline_id, "grant_id": grant.grant_id, "fencing_token": token, "pointer_version": version})
+            production_run_id=f"production-run:{freeze.frozen_artifact.source_candidate_id.value}"
+            run=self._production_from(self.store.get("production_run",production_run_id))
+            if run.current_state is not ProductionState.PR_16_IMPLEMENTATION_FROZEN:
+                raise PermissionError(f"canonical closure requires PR-16, got {run.current_state.value}")
+            run=self._transition_production(run,ProductionEvent.CANONICAL_CLOSURE_COMPLETE,actor_principal_id)
+            self._audit(actor_principal_id, "baseline_promoted", "baseline", baseline_id, {"lineage_id": lineage_id, "frozen_artifact_id": frozen_artifact_id, "predecessor": expected_predecessor_baseline_id, "grant_id": grant.grant_id, "fencing_token": token, "pointer_version": version, "production_state":run.current_state.value})
         return record
 
     def deploy(self, *, deployment_id: str, frozen_artifact_id: str, actor_principal_id: str):
@@ -635,5 +731,6 @@ class StudioService:
             "freezes": self.store.list("freeze"),
             "baselines": self.store.list("baseline"),
             "deployments": self.store.list("deployment"),
+            "production_runs": self.store.list("production_run"),
             "audit": self.store.list_audit(),
         }
