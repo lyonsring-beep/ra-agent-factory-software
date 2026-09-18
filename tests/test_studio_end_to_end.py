@@ -52,15 +52,21 @@ def test_studio_happy_path_through_deployment(tmp_path: Path) -> None:
         expected_predecessor_baseline_id=None,
         actor_principal_id="promoter",
     )
-    deployment = studio.deploy(
-        deployment_id="deployment-1",
-        frozen_artifact_id=freeze.frozen_artifact.id.value,
+    deployment = studio.authorize_deployment(
+        deployment_id="deployment-1", frozen_artifact_id=freeze.frozen_artifact.id.value,
         actor_principal_id="deployer",
+        runtime_profile={"runtime":"python-3.14"}, environment={"env":"test"},
+        provider_binding={"provider":"local-test"}, secret_scope={},
+        permission_scope={"permissions":[]},
+        policy={"authority_boundary":{"network":False,"tools":[]}},
+        runtime_boundary={"network":False,"tools":[]},
     )
+    deployment = studio.activate_runtime(deployment_id="deployment-1", actor_principal_id="deployer")
 
     assert baseline.frozen_artifact_id == freeze.frozen_artifact.id
-    assert deployment.artifact_id == freeze.frozen_artifact.id
-    assert deployment.baseline_id == baseline.baseline_id
+    assert deployment.frozen_artifact_id == freeze.frozen_artifact.id.value
+    assert deployment.baseline_id == baseline.baseline_id.value
+    assert deployment.runtime_standing.value == "ACTIVE"
 
 
 def test_ungranted_principal_cannot_review(tmp_path: Path) -> None:
