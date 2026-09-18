@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from typing import Mapping
 
 from .identity import RevisionId
@@ -11,6 +13,15 @@ class EffectFixture:
     fixture_id: str
     input_text: str
     expected_contains: tuple[str, ...] = ()
+
+    @property
+    def fixture_identity(self) -> str:
+        raw=json.dumps({
+            "fixture_id":self.fixture_id,
+            "input_text":self.input_text,
+            "expected_contains":list(self.expected_contains),
+        },sort_keys=True,separators=(",",":")).encode()
+        return sha256(raw).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +51,11 @@ def evaluate_fixture(
     output_text: str,
     *,
     executor_identity: str,
+    environment_identity: str = "",
+    execution_policy_identity: str = "",
+    termination_reason: str = "",
+    exit_code: int = 0,
+    duration_ms: int = 0,
 ) -> TestObservation:
     passed = all(token in output_text for token in fixture.expected_contains)
     return TestObservation(
@@ -47,7 +63,17 @@ def evaluate_fixture(
         revision_id=revision_id,
         output_text=output_text,
         passed=passed,
-        metadata={"authority": "observation_only", "executor_identity": executor_identity},
+        metadata={
+            "authority": "observation_only",
+            "executor_identity": executor_identity,
+            "environment_identity": environment_identity,
+            "execution_policy_identity": execution_policy_identity,
+            "fixture_identity": fixture.fixture_identity,
+            "input_identity": sha256(fixture.input_text.encode()).hexdigest(),
+            "termination_reason": termination_reason,
+            "exit_code": str(exit_code),
+            "duration_ms": str(duration_ms),
+        },
     )
 
 
