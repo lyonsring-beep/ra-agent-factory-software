@@ -156,7 +156,7 @@ def test_st2_b03_authority_mutation_and_idempotency_rollback_together(tmp_path: 
     assert result.standing == "REJECTED"
     with pytest.raises(KeyError):
         s.store.get("module","v103-atomic-r1")
-    assert s.store.get_idempotency("v103-atomic-cmd") is None
+    assert s.store.get_idempotency("v103-atomic-idem") is None
 
 
 def test_st2_b04_activation_uses_durable_attempt_and_preserves_ambiguous(tmp_path: Path) -> None:
@@ -178,7 +178,7 @@ def test_st2_b04_activation_uses_durable_attempt_and_preserves_ambiguous(tmp_pat
     assert first.payload["runtime_standing"] == "ACTIVATING"
     attempt=s.store.get("activation_attempt",first.result_ref)
     assert attempt["standing"] == "AMBIGUOUS"
-    assert s.store.get_idempotency("v103-activate-cmd")["result_key"] == first.result_ref
+    assert s.store.get_idempotency("v103-activate-idem")["result_key"] == first.result_ref
 
     second=cp.execute(command)
     assert second.standing == "REPLAYED"
