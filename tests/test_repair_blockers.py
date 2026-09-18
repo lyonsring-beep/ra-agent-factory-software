@@ -7,7 +7,7 @@ import pytest
 from ra_agent_studio.application.studio import StudioService
 from ra_agent_studio.domain.auth import AuthorityGrant, AuthorityScope, Principal
 from ra_agent_studio.domain.effect import EffectFixture
-from tests.support import ContractTestFactoryRuntime, authority_registry
+from tests.support import ContractTestFactoryRuntime, ContractTestRuntimeLauncher, authority_registry
 
 
 def studio(tmp_path: Path) -> StudioService:
@@ -15,6 +15,7 @@ def studio(tmp_path: Path) -> StudioService:
         db_path=str(tmp_path / "studio.db"),
         authority_registry=authority_registry(),
         factory_runtime=ContractTestFactoryRuntime(),
+        runtime_launcher=ContractTestRuntimeLauncher(),
     )
 
 
@@ -116,7 +117,7 @@ def test_authoritative_records_survive_restart(tmp_path: Path) -> None:
     db_path = tmp_path / "persistent.db"
     registry = authority_registry()
     first = StudioService(
-        db_path=str(db_path), authority_registry=registry, factory_runtime=ContractTestFactoryRuntime()
+        db_path=str(db_path), authority_registry=registry, factory_runtime=ContractTestFactoryRuntime(), runtime_launcher=ContractTestRuntimeLauncher()
     )
     add_executable_module(first, revision_id="r1", prefix="A")
     candidate = build_candidate(first, revision_id="r1", composition_id="c1")
@@ -145,11 +146,11 @@ def test_authoritative_records_survive_restart(tmp_path: Path) -> None:
         permission_scope={"permissions":[]}, policy={"authority_boundary":{"network":False}},
         runtime_boundary={"network":False},
     )
-    first.activate_runtime(deployment_id="d1", actor_principal_id="deployer")
+    first.launch_runtime(deployment_id="d1", actor_principal_id="deployer")
     first.store.close()
 
     second = StudioService(
-        db_path=str(db_path), authority_registry=registry, factory_runtime=ContractTestFactoryRuntime()
+        db_path=str(db_path), authority_registry=registry, factory_runtime=ContractTestFactoryRuntime(), runtime_launcher=ContractTestRuntimeLauncher()
     )
     snapshot = second.snapshot()
     assert snapshot["reviews"][0]["review_id"] == review.review_id
@@ -231,7 +232,7 @@ def test_freeze_promotion_and_deployment_are_distinct_authority_transitions(tmp_
         permission_scope={"permissions":[]}, policy={"authority_boundary":{"network":False}},
         runtime_boundary={"network":False},
     )
-    deployment = service.activate_runtime(deployment_id="d-current", actor_principal_id="deployer")
+    deployment = service.launch_runtime(deployment_id="d-current", actor_principal_id="deployer")
     assert deployment.baseline_id == "b2"
     assert deployment.runtime_standing.value == "ACTIVE"
     held = service.place_safety_hold(deployment_id="d-current", actor_principal_id="deployer")
