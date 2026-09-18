@@ -602,6 +602,8 @@ class StudioService:
     def freeze(self, *, candidate_id: str, review_id: str, actor_principal_id: str) -> FreezeRecord:
         candidate = self._candidate_from(self.store.get("candidate", candidate_id))
         review = self._review_from(self.store.get("review", review_id))
+        if review.subject_candidate_id != candidate.candidate_id or review.subject_hash != candidate.candidate_hash:
+            raise PermissionError("review is not bound to this exact candidate/hash")
         production_run_id=f"production-run:{candidate_id}"
         run=self._production_from(self.store.get("production_run",production_run_id))
         if run.current_state is not ProductionState.PR_15_IMPLEMENTATION_APPROVED:
