@@ -43,6 +43,15 @@ _GOVERNANCE = {
     "stale-reconciliation-invalidates-design":"STALE_RECONCILIATION_INVALIDATES_DESIGN",
     "canonical-closure-complete":"CANONICAL_CLOSURE_COMPLETE",
 }
+_DEPLOYMENT = {
+    "authorize-deployment":"AUTHORIZE_DEPLOYMENT",
+    "activate-runtime":"ACTIVATE_RUNTIME",
+    "stop-runtime":"STOP_RUNTIME",
+    "revoke-deployment-grant":"REVOKE_DEPLOYMENT_GRANT",
+    "place-safety-hold":"PLACE_SAFETY_HOLD",
+    "remove-safety-hold":"REMOVE_SAFETY_HOLD",
+    "revalidate-deployment":"REVALIDATE_DEPLOYMENT",
+}
 _FACTORY = {
     "requirement-submit":"REQUIREMENT_SUBMIT",
     "module-revision-create":"MODULE_REVISION_CREATE",
@@ -72,9 +81,13 @@ GOVERNANCE_OPERATION_MAP = MappingProxyType({
 FACTORY_OPERATION_MAP = MappingProxyType({
     k: ApplicationOperationDescriptor(f"op:factory:{k}", k, v) for k,v in _FACTORY.items()
 })
+DEPLOYMENT_OPERATION_MAP = MappingProxyType({
+    k: ApplicationOperationDescriptor(f"op:deployment:{k}", k, v) for k,v in _DEPLOYMENT.items()
+})
 APPLICATION_OPERATION_CATALOG = MappingProxyType({
     **{x.descriptor_id:x for x in GOVERNANCE_OPERATION_MAP.values()},
     **{x.descriptor_id:x for x in FACTORY_OPERATION_MAP.values()},
+    **{x.descriptor_id:x for x in DEPLOYMENT_OPERATION_MAP.values()},
 })
 
 
