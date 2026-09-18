@@ -43,11 +43,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          python - <<'PY'
+          @'
           import ra_agent_studio.api
           print("WINDOWS_NATIVE_API_IMPORT_PASS")
           print(ra_agent_studio.api.studio.sandbox_executor.identity)
-          PY
+          '@ | python -
 
       - name: Run native Windows sandbox adversarial tests
         shell: pwsh
