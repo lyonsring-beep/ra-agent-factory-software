@@ -224,18 +224,20 @@ class WindowsNativePythonExecutor:
         escaped_program=self.python_executable.replace("'","''")
         command=(
             "$ErrorActionPreference='Stop';"
-            f"$r=Get-NetFirewallRule -DisplayName '{escaped_rule}' -ErrorAction Stop | "
-            "Where-Object {$_.Enabled -eq 'True' -and $_.Direction -eq 'Outbound' -and $_.Action -eq 'Block'} | "
-            "Select-Object -First 1;"
-            "if(-not $r){exit 11};"
-            "$a=$r | Get-NetFirewallApplicationFilter;"
-            f"if(-not $a -or [IO.Path]::GetFullPath($a.Program) -ne [IO.Path]::GetFullPath('{escaped_program}')){{exit 12}}"
+            "$policy=New-Object -ComObject HNetCfg.FwPolicy2;"
+            f"$rule=$policy.Rules.Item('{escaped_rule}');"
+            "if(-not $rule){exit 11};"
+            "if(-not $rule.Enabled -or $rule.Direction -ne 2 -or $rule.Action -ne 0){exit 12};"
+            f"if([IO.Path]::GetFullPath($rule.ApplicationName) -ne [IO.Path]::GetFullPath('{escaped_program}')){{exit 13}}"
         )
-        checked=subprocess.run(
-            ["powershell.exe","-NoProfile","-NonInteractive","-Command",command],
-            capture_output=True,text=True,check=False,timeout=10,
-            env={"SystemRoot":os.environ.get("SystemRoot",r"C:\Windows"),"PATH":os.environ.get("PATH","")},
-        )
+        try:
+            checked=subprocess.run(
+                ["powershell.exe","-NoProfile","-NonInteractive","-Command",command],
+                capture_output=True,text=True,check=False,timeout=20,
+                env={"SystemRoot":os.environ.get("SystemRoot",r"C:\\Windows"),"PATH":os.environ.get("PATH","")},
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("Windows native firewall guard verification timed out") from exc
         if checked.returncode != 0:
             raise RuntimeError(
                 "Windows native controlled execution requires an enabled outbound-block firewall rule "
