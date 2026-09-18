@@ -564,8 +564,31 @@ class StudioService:
                 raise RuntimeError("Factory candidate byte publication hash mismatch")
             self.store.add("evidence", evidence.evidence_id, evidence_payload)
             self.store.add("candidate", candidate.candidate_id.value, self._candidate_payload(candidate))
+            for contributor_id in sorted(candidate.contributor_principal_ids):
+                contributor_workspace=(
+                    self.authority.principal(contributor_id).workspace_id
+                    if contributor_id in {p.principal_id for p in [self.authority.principal(x) for x in candidate.contributor_principal_ids if x in self.authority._principals]}
+                    else candidate.workspace_id
+                )
+                self.store.add_immutable("contribution_record",f"{candidate.candidate_id.value}:{contributor_id}",{
+                    "exact_candidate_id":candidate.candidate_id.value,
+                    "exact_candidate_hash":candidate.candidate_hash.value,
+                    "principal_id":contributor_id,
+                    "workspace_id":contributor_workspace,
+                    "contribution_kind":"BUILD_OR_MODULE_AUTHORSHIP",
+                })
+            self.store.add_immutable("cross_store_publication",candidate.candidate_id.value,{
+                "object_kind":"implementation_candidate",
+                "object_id":candidate.candidate_id.value,
+                "content_id":published,
+                "content_sha256":published,
+                "publication_standing":"AUTHORITATIVELY_PUBLISHED",
+                "integrity_standing":"VERIFIED",
+                "recovery_epoch":self.store.recovery_epoch(),
+            })
             self.store.add_immutable("candidate_closure", candidate.candidate_id.value, {
                 "candidate_hash": candidate.candidate_hash.value,
+                "container_identity": candidate.candidate_hash.value,
                 "artifact_blob_hash": published,
                 "logical_payload_identity": candidate.logical_payload_identity.value,
                 "manifest_identity": candidate.manifest_identity.value,
@@ -643,6 +666,17 @@ class StudioService:
         with self.store.transaction():
             run=self._production_from(self.store.get("production_run",production_run_id))
             run=self._transition_production(run,ProductionEvent.IMPLEMENTATION_REVIEW_SUBMITTED,reviewer_principal_id)
+            self.store.add_immutable("review_submission",record.review_id,{
+                "exact_target_ref":candidate.factory_candidate_revision_id or candidate.candidate_id.value,
+                "studio_candidate_id":candidate.candidate_id.value,
+                "candidate_hash":candidate.candidate_hash.value,
+                "review_method_ref":review_method,
+                "review_authority_ref":grant.grant_id,
+                "reviewer_principal_id":reviewer.principal_id,
+                "reviewer_workspace_id":reviewer.workspace_id,
+                "verification_package_ref":candidate.factory_evidence_id,
+                "submitted_at_state":run.current_state.value,
+            })
             self.store.add("review", record.review_id, self._review_payload(record))
             self.store.add_immutable("review_admission",record.review_id,{
                 "exact_target_ref":candidate.factory_candidate_revision_id or candidate.candidate_id.value,
@@ -666,6 +700,11 @@ class StudioService:
                     "logical_payload_identity":candidate.logical_payload_identity.value if candidate.logical_payload_identity else "",
                     "manifest_identity":candidate.manifest_identity.value if candidate.manifest_identity else "",
                     "review_id":record.review_id,
+                    "review_accepted_transport_basis":{
+                        "container_identity":candidate.candidate_hash.value,
+                        "logical_payload_identity":candidate.logical_payload_identity.value if candidate.logical_payload_identity else "",
+                        "manifest_identity":candidate.manifest_identity.value if candidate.manifest_identity else "",
+                    },
                     "review_independence":"INDEPENDENT",
                     "production_state":run.current_state.value,
                 })
@@ -760,6 +799,7 @@ class StudioService:
                 "logical_payload_identity": candidate.logical_payload_identity.value,
                 "manifest_identity": candidate.manifest_identity.value,
                 "review_id": review_id,
+                "freeze_custody_workspace": candidate.workspace_id,
             })
             run=self._production_from(self.store.get("production_run",production_run_id))
             run=self._transition_production(run,ProductionEvent.IMPLEMENTATION_FROZEN_ACCEPTED,actor_principal_id)
