@@ -335,6 +335,32 @@ class WindowsNativePythonExecutor:
             raise RuntimeError("AppContainer SID string is empty")
         return sid,sid_string
 
+    @classmethod
+    def provision_runtime_acl(
+        cls, *, python_executable: str, appcontainer_profile_name: str = "RAAgentStudio.Sandbox.v106"
+    ) -> str:
+        """Installer/CI provisioning step: grant only RX on the dedicated runtime to AppContainer."""
+        if os.name != "nt":
+            raise RuntimeError("Windows native runtime provisioning requires Windows")
+        obj=cls.__new__(cls)
+        obj.python_executable=str(Path(python_executable).resolve())
+        obj.python_root=str(Path(obj.python_executable).parent.resolve())
+        obj.appcontainer_profile_name=appcontainer_profile_name
+        sid,sid_string=obj._ensure_appcontainer_profile()
+        obj._appcontainer_sid=sid
+        obj._appcontainer_sid_string=sid_string
+        grant=f"*{sid_string}:(OI)(CI)(RX)"
+        result=subprocess.run(
+            ["icacls",obj.python_root,"/grant",grant,"/T","/C"],
+            capture_output=True,text=True,check=False,timeout=120,env=os.environ.copy(),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"failed to ACL-broker dedicated Python runtime: {result.stderr.strip() or result.stdout.strip()}"
+            )
+        obj._verify_runtime_acl()
+        return sid_string
+
     def _verify_runtime_acl(self) -> None:
         """Verify the dedicated runtime directory explicitly brokers AppContainer RX access."""
         checked=subprocess.run(
@@ -350,7 +376,7 @@ class WindowsNativePythonExecutor:
     def _grant_sandbox_acl(self, root: Path) -> None:
         grant=f"*{self._appcontainer_sid_string}:(OI)(CI)(M)"
         result=subprocess.run(
-            ["icacls",str(root),"/inheritance:r","/grant:r",grant],
+            ["icacls",str(root),"/grant",grant],
             capture_output=True,text=True,check=False,timeout=20,
             env=os.environ.copy(),
         )
@@ -358,7 +384,7 @@ class WindowsNativePythonExecutor:
             raise RuntimeError(f"failed to ACL-broker sandbox directory: {result.stderr.strip() or result.stdout.strip()}")
 
     @staticmethod
-    def _create_job(process_handle: int):
+    def _create_job(process_handle: int, thread_handle: int | None = None):
         kernel32=ctypes.WinDLL("kernel32",use_last_error=True)
         kernel32.CreateJobObjectW.argtypes=[ctypes.c_void_p,wintypes.LPCWSTR]
         kernel32.CreateJobObjectW.restype=wintypes.HANDLE
@@ -516,7 +542,7 @@ class WindowsNativePythonExecutor:
                     cwd=str(root),env=env,
                 )
                 try:
-                    job,kernel32=self._create_job(int(pi.hProcess))
+                    job,kernel32=self._create_job(int(pi.hProcess),int(pi.hThread))
                 except BaseException:
                     ctypes.WinDLL("kernel32",use_last_error=True).TerminateProcess(pi.hProcess,126)
                     raise
