@@ -15,6 +15,14 @@ class AuthorityScope(StrEnum):
     PROMOTE_BASELINE = "promote_baseline"
     DEPLOY = "deploy"
     BUILD = "build"
+    HOLD_DEPLOYMENT = "hold_deployment"
+    REVOKE_DEPLOYMENT = "revoke_deployment"
+
+
+class GrantStanding(StrEnum):
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    REVOKED = "revoked"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,11 +40,20 @@ class AuthorityGrant:
     workspace_id: str
     review_methods: frozenset[str] = frozenset()
     independent_of_principals: frozenset[str] = frozenset()
+    independent_of_workspaces: frozenset[str] = frozenset()
+    authority_source: str = "server-governance"
+    target_scope: str = "exact_workspace"
+    constraints: frozenset[str] = frozenset()
+    standing: GrantStanding = GrantStanding.ACTIVE
     expires_at: datetime | None = None
 
     def allows(self, scope: AuthorityScope, *, workspace_id: str, now: datetime | None = None) -> bool:
         now = now or datetime.now(UTC)
+        if self.standing is not GrantStanding.ACTIVE:
+            return False
         if self.workspace_id != workspace_id or scope not in self.scopes:
+            return False
+        if not self.authority_source or not self.target_scope:
             return False
         if self.expires_at is not None and now >= self.expires_at:
             return False
@@ -44,12 +61,7 @@ class AuthorityGrant:
 
 
 class AuthorityRegistry:
-    """Server-owned principal and grant registry.
-
-    Callers cannot manufacture reviewer identity or authority in request bodies. API callers
-    authenticate with a bearer token that resolves to a server-side Principal. Grants are
-    loaded from trusted configuration and have no public mutation endpoint.
-    """
+    """Server-owned principal/grant registry; request bodies cannot mint authority."""
 
     def __init__(self) -> None:
         self._principals: dict[str, Principal] = {}
@@ -90,8 +102,7 @@ class AuthorityRegistry:
     ) -> AuthorityGrant:
         self.principal(principal_id)
         matches = [
-            grant
-            for grant in self._grants.values()
+            grant for grant in self._grants.values()
             if grant.principal_id == principal_id and grant.allows(scope, workspace_id=workspace_id, now=now)
         ]
         if review_method is not None:
@@ -100,8 +111,7 @@ class AuthorityRegistry:
             raise PermissionError(
                 f"principal {principal_id} lacks {scope.value} authority for workspace {workspace_id}"
             )
-        if len(matches) > 1:
-            matches.sort(key=lambda x: x.grant_id)
+        matches.sort(key=lambda x: x.grant_id)
         return matches[0]
 
     @classmethod
@@ -112,12 +122,10 @@ class AuthorityRegistry:
             return registry
         data = json.loads(raw)
         for item in data.get("principals", []):
-            principal = Principal(
-                principal_id=item["principal_id"],
-                workspace_id=item["workspace_id"],
-                display_name=item.get("display_name", ""),
+            registry.add_principal(
+                Principal(item["principal_id"], item["workspace_id"], item.get("display_name", "")),
+                bearer_token=item.get("bearer_token"),
             )
-            registry.add_principal(principal, bearer_token=item.get("bearer_token"))
         for item in data.get("grants", []):
             expires = datetime.fromisoformat(item["expires_at"]) if item.get("expires_at") else None
             registry.add_grant(
@@ -128,6 +136,11 @@ class AuthorityRegistry:
                     workspace_id=item["workspace_id"],
                     review_methods=frozenset(item.get("review_methods", [])),
                     independent_of_principals=frozenset(item.get("independent_of_principals", [])),
+                    independent_of_workspaces=frozenset(item.get("independent_of_workspaces", [])),
+                    authority_source=item.get("authority_source", "server-governance"),
+                    target_scope=item.get("target_scope", "exact_workspace"),
+                    constraints=frozenset(item.get("constraints", [])),
+                    standing=GrantStanding(item.get("standing", "active")),
                     expires_at=expires,
                 )
             )
