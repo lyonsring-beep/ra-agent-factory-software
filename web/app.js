@@ -1,4 +1,4 @@
-const API = window.RA_STUDIO_API || 'http://localhost:8000';
+const API = window.RA_STUDIO_API || '/api';
 const $ = s => document.querySelector(s);
 const show = (id, data) => $(id).textContent = JSON.stringify(data, null, 2);
 const session = () => ({
