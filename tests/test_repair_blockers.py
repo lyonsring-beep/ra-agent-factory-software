@@ -83,7 +83,7 @@ def test_review_requires_method_scope_workspace_and_contribution_independence(tm
             independent_of_principals=frozenset(),
         )
     )
-    with pytest.raises(PermissionError, match="does not attest contribution independence"):
+    with pytest.raises(PermissionError, match="workspace contributed|does not attest principal contribution independence"):
         service.review(
             candidate_id=candidate.candidate_id.value,
             reviewer_principal_id="contributor-reviewer",
@@ -225,3 +225,30 @@ def test_freeze_promotion_and_deployment_are_distinct_authority_transitions(tmp_
         actor_principal_id="deployer",
     )
     assert deployment.baseline_id.value == "b2"
+
+
+def test_same_target_review_requires_workspace_independence(tmp_path: Path) -> None:
+    service = studio(tmp_path)
+    add_executable_module(service, revision_id="rw1", prefix="A")
+    candidate = build_candidate(service, revision_id="rw1", composition_id="cw1")
+    service.authority.add_principal(Principal("same-workspace-reviewer", "ws"))
+    service.authority.add_grant(
+        AuthorityGrant(
+            "same-workspace-review-grant",
+            "same-workspace-reviewer",
+            frozenset({AuthorityScope.REVIEW}),
+            "ws",
+            review_methods=frozenset({"external_ai"}),
+            independent_of_principals=frozenset({"builder"}),
+            independent_of_workspaces=frozenset({"ws"}),
+            authority_source="external-review-authority",
+            target_scope="exact_candidate_in_workspace",
+        )
+    )
+    with pytest.raises(PermissionError, match="reviewer workspace contributed"):
+        service.review(
+            candidate_id=candidate.candidate_id.value,
+            reviewer_principal_id="same-workspace-reviewer",
+            review_method="external_ai",
+            passed=True,
+        )
