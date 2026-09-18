@@ -20,6 +20,7 @@ from ra_agent_studio.domain.failure_routing import CandidateMutationStanding, Fa
 from ra_agent_studio.infra.execution import IsolatedPythonProcessExecutor
 from ra_agent_studio.infra.factory import FACTORY_V111_RUNTIME_IDENTITY, FactoryRuntime, SubprocessFactoryRuntime
 from ra_agent_studio.infra.sqlite import SQLiteStateStore
+from ra_agent_studio.infra.runtime import RuntimeLauncher, SubprocessRuntimeLauncher
 
 
 class StudioService:
@@ -36,11 +37,13 @@ class StudioService:
         authority_registry: AuthorityRegistry | None = None,
         factory_runtime: FactoryRuntime | None = None,
         sandbox_executor: IsolatedPythonProcessExecutor | None = None,
+        runtime_launcher: RuntimeLauncher | None = None,
     ) -> None:
         self.store = SQLiteStateStore(db_path or os.environ.get("RA_STUDIO_DB_PATH", "ra_agent_studio.db"))
         self.authority = authority_registry or AuthorityRegistry.from_environment()
         self.factory_runtime = factory_runtime
         self.sandbox_executor = sandbox_executor or IsolatedPythonProcessExecutor()
+        self.runtime_launcher = runtime_launcher
 
     @staticmethod
     def _module_payload(item: ModuleRevision) -> dict:
@@ -382,6 +385,11 @@ class StudioService:
         agent_authority_boundary_ref: str = "ra-agent-studio:default-authority-boundary",
         shared_change_authorization_ref: str = "",
     ) -> ModuleRevision:
+        principal=self.authority.principal(actor_principal_id)
+        self.authority.require_grant(
+            actor_principal_id, AuthorityScope.IMPLEMENTATION_AUTHORING,
+            workspace_id=principal.workspace_id,
+        )
         revision = ModuleRevision.create(
             ModuleId(module_id),
             RevisionId(revision_id),
@@ -417,6 +425,11 @@ class StudioService:
 
     def prepare_candidate(self, revision_id: str, *, actor_principal_id: str = "system") -> ModuleRevision:
         revision = self.get_module(revision_id)
+        principal=self.authority.principal(actor_principal_id)
+        self.authority.require_grant(
+            actor_principal_id, AuthorityScope.IMPLEMENTATION_AUTHORING,
+            workspace_id=principal.workspace_id,
+        )
         candidate = replace(revision, state=ModuleRevisionState.CANDIDATE)
         with self.store.transaction():
             self.store.put("module", revision_id, self._module_payload(candidate))
@@ -460,6 +473,11 @@ class StudioService:
         return compare_observations(before, after)
 
     def compose(self, composition_id: str, revision_ids: list[str], *, actor_principal_id: str = "system") -> RealizedAgentComposition:
+        principal=self.authority.principal(actor_principal_id)
+        self.authority.require_grant(
+            actor_principal_id, AuthorityScope.DESIGN_AUTHORING,
+            workspace_id=principal.workspace_id,
+        )
         bindings: list[ModuleBinding] = []
         for revision_id in revision_ids:
             revision = self.get_module(revision_id)
