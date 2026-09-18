@@ -1,0 +1,131 @@
+name: Package RA Agent Studio implementation candidate v1.06
+
+on:
+  push:
+    branches: [implementation-native-windows-v1_06]
+    paths:
+      - '.github/workflows/package_candidate_v106.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  package-candidate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Enforce targeted v1.06 delta from accepted v1.05
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=ba6af729bb703e4362b6aa351f30c56560566a02
+          git cat-file -e "$BASE^{commit}"
+          git diff --name-only "$BASE"...HEAD | tee /tmp/v106-delta.txt
+          while IFS= read -r path; do
+            case "$path" in
+              src/ra_agent_studio/infra/execution.py|src/ra_agent_studio/application/studio.py|tests/test_v106_native_windows_executor.py|docs/V1_06_NATIVE_WINDOWS_RUNTIME_EVIDENCE_MAP.md|.github/workflows/native_windows_v106.yml|.github/workflows/package_candidate_v106.yml) ;;
+              *)
+                echo "UNAUTHORIZED_V106_DELTA:$path" >&2
+                exit 1
+                ;;
+            esac
+          done < /tmp/v106-delta.txt
+          echo "V106_TARGETED_DELTA_FIREWALL_PASS"
+
+      - name: Assert implementation bytes equal successful Windows-native test commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          TESTED=38c68b2f339de5d025e48247fe8aced2f9a43c43
+          git diff --exit-code "$TESTED"...HEAD --             src/ra_agent_studio/infra/execution.py             src/ra_agent_studio/application/studio.py             tests/test_v106_native_windows_executor.py             .github/workflows/native_windows_v106.yml
+          echo "NATIVE_WINDOWS_TESTED_IMPLEMENTATION_IDENTITY_PASS"
+
+      - name: Download successful native Windows runtime evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_v1_06_NATIVE_WINDOWS_RUNTIME_EVIDENCE
+          path: evidence/native-windows
+          repository: lyonsring-beep/ra-agent-factory-software
+          run-id: 35345216792
+          github-token: ${{ github.token }}
+
+      - name: Install and run cumulative regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[test]'
+          mkdir -p evidence/linux
+          python -m pytest -q --junitxml=evidence/linux/pytest-junit.xml | tee evidence/linux/pytest-output.txt
+
+      - name: Verify accepted surfaces remain unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=ba6af729bb703e4362b6aa351f30c56560566a02
+          git diff --exit-code "$BASE"...HEAD --             src/ra_agent_studio/api.py             src/ra_agent_studio/application/control_plane.py             src/ra_agent_studio/application/operation_catalog.py             src/ra_agent_studio/infra/factory.py             src/ra_agent_studio/infra/runtime.py             src/ra_agent_studio/infra/sqlite.py             scripts/factory_v111_bridge.py             web             compose.yaml             Dockerfile             pyproject.toml
+          echo "V105_ACCEPTED_SURFACES_PRESERVED"
+
+      - name: Record exact v1.06 candidate identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "candidate=RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06"
+            echo "repository=lyonsring-beep/ra-agent-factory-software"
+            echo "commit=${GITHUB_SHA}"
+            echo "tree=$(git rev-parse HEAD^{tree})"
+            echo "branch=${GITHUB_REF_NAME}"
+            echo "workflow_run_id=${GITHUB_RUN_ID}"
+            echo "baseline_system_accepted_version=v1.05"
+            echo "baseline_commit=ba6af729bb703e4362b6aa351f30c56560566a02"
+            echo "baseline_frozen_candidate_sha256=80f315247fd34d3cb6daec50f70588c2ad3f452eb269f4a5a5fcdb5d4aa7ea3b"
+            echo "baseline_final_acceptance_run=35340851677"
+            echo "native_windows_test_run=35345216792"
+            echo "native_windows_test_artifact_id=10546820374"
+            echo "change_scope=CONTROLLED_EXECUTION_WINDOWS_NATIVE_PROVIDER_ONLY"
+            echo "architecture_reopen=NO"
+            echo "factory_reopen=NO"
+            echo "frontend_reopen=NO"
+            echo "api_command_plane_reopen=NO"
+            echo "software_freeze=NOT_AUTHORIZED_PENDING_TARGETED_REVIEW"
+          } > evidence/IMPLEMENTATION_IDENTITY.txt
+          git diff --name-status ba6af729bb703e4362b6aa351f30c56560566a02...HEAD > evidence/V105_TO_V106_DELTA.txt
+          git ls-files | LC_ALL=C sort > evidence/source-files.txt
+          git ls-files -s | LC_ALL=C sort > evidence/source-index.txt
+          sha256sum evidence/source-files.txt evidence/source-index.txt > evidence/source-manifest.sha256
+
+      - name: Build exact v1.06 review candidate archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06
+          mkdir -p "$ROOT"
+          git archive --format=tar HEAD | tar -x -C "$ROOT"
+          mkdir -p "$ROOT/evidence/candidate"
+          cp -a evidence/. "$ROOT/evidence/candidate/"
+          zip -X -r RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip "$ROOT" >/dev/null
+          unzip -t RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip | tee evidence/archive-integrity.txt
+          sha256sum RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.sha256
+          stat -c '%s' RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.size
+
+      - name: Upload exact v1.06 implementation candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06
+          path: |
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.sha256
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.size
+            evidence/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 90
