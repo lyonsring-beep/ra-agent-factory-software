@@ -82,7 +82,7 @@ def template_parameters(module_revision_ids: tuple[str, ...]) -> dict[str, objec
         "HOSTILE_TESTS": "studio-live-factory-integration",
         "AGENT_SPECIFIC_EXECUTION": "return request",
         "ROLE_REF": "ra-agent-studio:realized-agent",
-        "IMPLEMENTATION_REF": "ra-agent-studio:implementation-repair-v1_01",
+        "IMPLEMENTATION_REF": "ra-agent-studio:implementation-repair-v1_02",
         "REQUIRED_MODULES": repr(module_revision_ids),
         "EXTENSION_NAMESPACE": "ra_agent_studio",
         "AGENT_SPECIFIC_CAPABILITY_BINDINGS": "{}",
@@ -113,11 +113,17 @@ def main() -> int:
     for binding in request["bindings"]:
         content = base64.b64decode(binding["content_base64"], validate=True)
         studio_content_hash = binding["studio_content_hash"]
+        module_type_name = binding.get("module_type", "")
+        authority_class_name = binding.get("authority_class", "")
+        if not hasattr(ModuleType, module_type_name) or not hasattr(ModuleAuthorityClass, authority_class_name):
+            raise RuntimeError(f"SHARED_CHANGE_REQUIRED_STOP: unsupported frozen Factory authority classification:{module_type_name}:{authority_class_name}")
+        module_type = getattr(ModuleType, module_type_name)
+        authority_class = getattr(ModuleAuthorityClass, authority_class_name)
         revision = registry.create_revision(
             object_id=f"studio:{binding['module_id']}",
             content=content,
-            module_type=ModuleType.AGENT_SPECIFIC_EXTENSION_MODULE,
-            authority_class=ModuleAuthorityClass.FACTORY_AGENT_SPECIFIC,
+            module_type=module_type,
+            authority_class=authority_class,
             predecessor_revision_id=None,
             principal_ref="studio-build-principal",
             workspace_ref="studio-live-integration",
@@ -163,7 +169,7 @@ def main() -> int:
 
     candidate = CandidateBuildService(uow, blobstore).build(
         composition_id=realized.composition_id,
-        agent_requirement_ref="ra-agent-studio:live-integration",
+        agent_requirement_ref=request["agent_requirement_ref"],
         architecture_source_lock_ref=FROZEN_ARCHITECTURE_SOURCE_LOCK,
         production_run_id=production_run_id,
         template_parameters=template_parameters(tuple(factory_revisions)),
@@ -202,6 +208,8 @@ def main() -> int:
         "frozen_package_attestation": json.loads(frozen_attestation.read_text(encoding="utf-8")),
         "studio_composition_id": request["studio_composition_id"],
         "studio_composition_hash": request["studio_composition_hash"],
+        "studio_agent_requirement_ref": request["agent_requirement_ref"],
+        "studio_agent_authority_boundary_ref": request["agent_authority_boundary_ref"],
         "factory_realized_composition_id": realized.composition_id,
         "factory_realized_composition_hash": realized.composition_hash,
         "factory_realization_fingerprint": realized.realization_fingerprint,
@@ -209,6 +217,17 @@ def main() -> int:
         "factory_implementation_candidate": persisted,
         "factory_produced_artifact_sha256": artifact_sha,
         "module_identity_map": studio_to_factory,
+        "module_authority_contract": [
+            {
+                "module_id": b["module_id"],
+                "module_type": b["module_type"],
+                "authority_class": b["authority_class"],
+                "editability": b["editability"],
+                "agent_requirement_ref": b["agent_requirement_ref"],
+                "agent_authority_boundary_ref": b["agent_authority_boundary_ref"],
+            }
+            for b in request["bindings"]
+        ],
         "reproducibility_basis": "exact frozen Factory v1.11 package digest and exact candidate identity",
     }
     evidence_path = work / "factory-v111-live-evidence.json"
