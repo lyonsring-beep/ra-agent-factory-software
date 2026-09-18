@@ -664,6 +664,20 @@ class StudioService:
         run=self._production_from(self.store.get("production_run",production_run_id))
         if run.current_state is not ProductionState.PR_15_IMPLEMENTATION_APPROVED:
             raise PermissionError(f"freeze requires PR-15 implementation approved, got {run.current_state.value}")
+        pointer=self.store.get_pointer("current_baseline",candidate.lineage_id.value)
+        current_baseline_id=pointer["value"] if pointer else None
+        expected_predecessor=candidate.predecessor_baseline_id.value if candidate.predecessor_baseline_id else None
+        if current_baseline_id != expected_predecessor:
+            with self.store.transaction():
+                run=self._production_from(self.store.get("production_run",production_run_id))
+                if run.current_state is ProductionState.PR_15_IMPLEMENTATION_APPROVED:
+                    run=self._transition_production(run,ProductionEvent.STALE_BASELINE_DETECTED,actor_principal_id)
+                    self._audit(actor_principal_id,"stale_baseline_detected","candidate",candidate_id,{
+                        "locked_predecessor":expected_predecessor,
+                        "current_predecessor":current_baseline_id,
+                        "production_state":run.current_state.value,
+                    })
+            raise PermissionError("STALE_BASELINE: B09 closure eligibility invalid until reconciliation")
         eligibility=self.store.get_immutable("b09_closure_eligibility",candidate.candidate_id.value)
         if eligibility.get("standing") != "ELIGIBLE" or eligibility.get("review_id") != review_id:
             raise PermissionError("B09ClosureEligibility is not ELIGIBLE for this exact review/candidate")
@@ -702,6 +716,38 @@ class StudioService:
             run=self._transition_production(run,ProductionEvent.IMPLEMENTATION_FROZEN_ACCEPTED,actor_principal_id)
             self._audit(actor_principal_id, "candidate_frozen", "freeze", frozen_id.value, {"candidate_id": candidate_id, "candidate_hash": candidate.candidate_hash.value, "review_id": review_id, "grant_id": grant.grant_id, "production_state":run.current_state.value})
         return record
+
+    def reconcile_stale_baseline(
+        self, *, candidate_id: str, actor_principal_id: str, no_design_change: bool,
+    ) -> ProductionRunRecord:
+        candidate=self._candidate_from(self.store.get("candidate",candidate_id))
+        self.authority.require_grant(actor_principal_id,AuthorityScope.BUILD,workspace_id=candidate.workspace_id)
+        production_run_id=f"production-run:{candidate_id}"
+        with self.store.transaction():
+            run=self._production_from(self.store.get("production_run",production_run_id))
+            if run.current_state is not ProductionState.PR_15R_BASELINE_RECONCILIATION_REQUIRED:
+                raise PermissionError(f"baseline reconciliation requires PR-15R, got {run.current_state.value}")
+            event=(
+                ProductionEvent.STALE_RECONCILED_NO_DESIGN_CHANGE
+                if no_design_change else
+                ProductionEvent.STALE_RECONCILIATION_INVALIDATES_DESIGN
+            )
+            run=self._transition_production(run,event,actor_principal_id)
+            self.store.add_immutable("baseline_reconciliation",f"{production_run_id}:{run.consistency_version}",{
+                "candidate_id":candidate_id,
+                "locked_predecessor":candidate.predecessor_baseline_id.value if candidate.predecessor_baseline_id else None,
+                "current_predecessor":(
+                    self.store.get_pointer("current_baseline",candidate.lineage_id.value) or {}
+                ).get("value"),
+                "outcome":"NO_DESIGN_CHANGE" if no_design_change else "DESIGN_INVALIDATED",
+                "to_state":run.current_state.value,
+                "recovery_epoch":self.store.recovery_epoch(),
+            })
+            self._audit(actor_principal_id,"baseline_reconciled","candidate",candidate_id,{
+                "outcome":"NO_DESIGN_CHANGE" if no_design_change else "DESIGN_INVALIDATED",
+                "production_state":run.current_state.value,
+            })
+            return run
 
     def create_baseline(
         self,
