@@ -11,7 +11,7 @@ from ra_agent_studio.domain.failure_routing import CandidateMutationStanding, Fa
 from ra_agent_studio.domain.module import ModuleAuthorityClass, ModuleEditability, ModuleType
 from ra_agent_studio.domain.production import ProductionState
 from ra_agent_studio.infra.sqlite import SQLiteStateStore
-from tests.support import ContractTestFactoryRuntime, authority_registry
+from tests.support import ContractTestFactoryRuntime, ContractTestRuntimeLauncher, authority_registry
 
 
 def service(tmp_path: Path) -> StudioService:
@@ -19,6 +19,7 @@ def service(tmp_path: Path) -> StudioService:
         db_path=str(tmp_path/"v102-extra.db"),
         authority_registry=authority_registry(),
         factory_runtime=ContractTestFactoryRuntime(),
+        runtime_launcher=ContractTestRuntimeLauncher(),
     )
 
 
@@ -210,7 +211,7 @@ def test_pr15_stale_baseline_routes_to_pr15r_and_requires_reconciliation(tmp_pat
 def test_superseded_active_deployment_enters_revalidation_and_can_be_denied(tmp_path: Path) -> None:
     s=service(tmp_path)
     dep=_frozen_deployment(s)
-    active=s.activate_runtime(deployment_id=dep.deployment_id,actor_principal_id="deployer")
+    active=s.launch_runtime(deployment_id=dep.deployment_id,actor_principal_id="deployer")
     assert active.runtime_standing.value == "ACTIVE"
 
     # Make another baseline current on the same lineage.
