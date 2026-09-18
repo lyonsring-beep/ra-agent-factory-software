@@ -79,6 +79,6 @@ def authority_registry() -> AuthorityRegistry:
         )
     )
     registry.add_grant(
-        AuthorityGrant("grant-deploy", "deployer", frozenset({AuthorityScope.DEPLOY}), "ws")
+        AuthorityGrant("grant-deploy", "deployer", frozenset({AuthorityScope.DEPLOY, AuthorityScope.HOLD_DEPLOYMENT, AuthorityScope.REVOKE_DEPLOYMENT}), "ws")
     )
     return registry
