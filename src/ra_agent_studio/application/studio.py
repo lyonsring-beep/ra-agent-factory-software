@@ -837,14 +837,15 @@ class StudioService:
             "revocation_reason":rec.revocation_reason,
         })
 
-    def activate_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
+    def begin_activation(self, *, deployment_id: str, actor_principal_id: str) -> str:
         rec=self._deployment_from(self.store.get("deployment",deployment_id))
         freeze=self._freeze_from(self.store.get("freeze",rec.frozen_artifact_id))
         candidate=self._candidate_from(self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value))
         self.authority.require_grant(actor_principal_id,AuthorityScope.DEPLOY,workspace_id=candidate.workspace_id)
         with self.store.transaction():
             rec=self._deployment_from(self.store.get("deployment",deployment_id))
-            if rec.recovery_epoch != self.store.recovery_epoch(): raise PermissionError("STALE_RECOVERY_EPOCH")
+            if rec.recovery_epoch != self.store.recovery_epoch():
+                raise PermissionError("STALE_RECOVERY_EPOCH")
             pointer=self.store.get_pointer("current_baseline",rec.lineage_id)
             if pointer is None or pointer["value"] != rec.baseline_id or int(pointer["version"]) != rec.current_baseline_version:
                 raise PermissionError("activation-time target currentness assessment failed")
@@ -854,20 +855,107 @@ class StudioService:
             if realization["identity"] != rec.realization_identity:
                 raise PermissionError("runtime realization drift")
             activating=runtime_next(rec.runtime_standing,RuntimeEvent.ACTIVATION_REQUESTED,"ACTIVATION_ADMISSIBLE")
+            attempt_id=f"activation-attempt:{uuid4().hex}"
             rec=replace(rec,runtime_standing=activating)
             self._save_deployment(rec)
-            # Runtime launch is represented by an immutable activation result; provider side-effects
-            # are outside Studio and must be reconciled against this attempt identity.
-            activation_ref=f"activation-result:{uuid4().hex}"
-            self.store.add_immutable("activation_result",activation_ref,{
-                "deployment_id":deployment_id,"standing":"ACTIVATED",
-                "realization_identity":rec.realization_identity,"recovery_epoch":rec.recovery_epoch,
+            self.store.add("activation_attempt",attempt_id,{
+                "activation_attempt_id":attempt_id,
+                "deployment_id":deployment_id,
+                "standing":"PENDING_EXTERNAL_RESULT",
+                "realization_identity":rec.realization_identity,
+                "recovery_epoch":rec.recovery_epoch,
+                "external_runtime_identity":"",
+                "failure_reason":"",
             })
-            active=runtime_next(rec.runtime_standing,RuntimeEvent.ACTIVATED)
-            rec=replace(rec,runtime_standing=active,activation_result_ref=activation_ref)
-            self._save_deployment(rec)
-            self._audit(actor_principal_id,"runtime_activated","deployment",deployment_id,{"activation_result_ref":activation_ref})
-        return rec
+            self.store.add_immutable("activation_assessment",attempt_id,{
+                "deployment_id":deployment_id,
+                "standing":"ACTIVATION_ADMISSIBLE",
+                "grant_standing":rec.grant_standing.value,
+                "runtime_standing_before":"AUTHORIZED_NOT_ACTIVE",
+                "current_baseline":rec.baseline_id,
+                "baseline_version":rec.current_baseline_version,
+                "realization_identity":rec.realization_identity,
+                "recovery_epoch":rec.recovery_epoch,
+            })
+            self._audit(actor_principal_id,"activation_requested","deployment",deployment_id,{"activation_attempt_id":attempt_id})
+        return attempt_id
+
+    def reconcile_activation(
+        self, *, activation_attempt_id: str, actor_principal_id: str,
+        outcome: str, external_runtime_identity: str = "", failure_reason: str = "",
+    ) -> DeploymentAuthorityRecord:
+        attempt=self.store.get("activation_attempt",activation_attempt_id)
+        deployment_id=attempt["deployment_id"]
+        rec=self._deployment_from(self.store.get("deployment",deployment_id))
+        freeze=self._freeze_from(self.store.get("freeze",rec.frozen_artifact_id))
+        candidate=self._candidate_from(self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value))
+        self.authority.require_grant(actor_principal_id,AuthorityScope.DEPLOY,workspace_id=candidate.workspace_id)
+        outcome=outcome.upper()
+        with self.store.transaction():
+            attempt=self.store.get("activation_attempt",activation_attempt_id)
+            rec=self._deployment_from(self.store.get("deployment",deployment_id))
+            if attempt["standing"] not in {"PENDING_EXTERNAL_RESULT","AMBIGUOUS"}:
+                if attempt["standing"] == outcome:
+                    return rec
+                raise PermissionError("activation attempt is already terminal")
+            if attempt["recovery_epoch"] != self.store.recovery_epoch():
+                raise PermissionError("STALE_RECOVERY_EPOCH")
+            if attempt["realization_identity"] != rec.realization_identity:
+                raise PermissionError("activation realization identity drift")
+            if outcome == "AMBIGUOUS":
+                self.store.put("activation_attempt",activation_attempt_id,{
+                    **attempt,"standing":"AMBIGUOUS","external_runtime_identity":external_runtime_identity,
+                    "failure_reason":failure_reason or "external side effect standing unresolved",
+                })
+                self._audit(actor_principal_id,"activation_ambiguous","deployment",deployment_id,{"activation_attempt_id":activation_attempt_id})
+                return rec
+            if outcome == "ACTIVATED":
+                if not external_runtime_identity:
+                    raise PermissionError("activated reconciliation requires external runtime identity")
+                active=runtime_next(rec.runtime_standing,RuntimeEvent.ACTIVATED)
+                result_ref=f"activation-result:{uuid4().hex}"
+                self.store.add_immutable("activation_result",result_ref,{
+                    "activation_attempt_id":activation_attempt_id,"deployment_id":deployment_id,
+                    "standing":"ACTIVATED","external_runtime_identity":external_runtime_identity,
+                    "realization_identity":rec.realization_identity,"recovery_epoch":rec.recovery_epoch,
+                })
+                rec=replace(rec,runtime_standing=active,activation_result_ref=result_ref)
+                self._save_deployment(rec)
+                self.store.put("activation_attempt",activation_attempt_id,{
+                    **attempt,"standing":"ACTIVATED","external_runtime_identity":external_runtime_identity,
+                    "failure_reason":"",
+                })
+                self._audit(actor_principal_id,"runtime_activated","deployment",deployment_id,{
+                    "activation_attempt_id":activation_attempt_id,"activation_result_ref":result_ref,
+                    "external_runtime_identity":external_runtime_identity,
+                })
+                return rec
+            if outcome == "FAILED":
+                failed=runtime_next(rec.runtime_standing,RuntimeEvent.ACTIVATION_FAILED)
+                result_ref=f"activation-result:{uuid4().hex}"
+                self.store.add_immutable("activation_result",result_ref,{
+                    "activation_attempt_id":activation_attempt_id,"deployment_id":deployment_id,
+                    "standing":"ACTIVATION_FAILED","failure_reason":failure_reason,
+                    "realization_identity":rec.realization_identity,"recovery_epoch":rec.recovery_epoch,
+                })
+                rec=replace(rec,runtime_standing=failed,activation_result_ref=result_ref)
+                self._save_deployment(rec)
+                self.store.put("activation_attempt",activation_attempt_id,{
+                    **attempt,"standing":"FAILED","external_runtime_identity":"",
+                    "failure_reason":failure_reason,
+                })
+                self._audit(actor_principal_id,"activation_failed","deployment",deployment_id,{
+                    "activation_attempt_id":activation_attempt_id,"failure_reason":failure_reason,
+                })
+                return rec
+            raise ValueError("activation outcome must be ACTIVATED, FAILED, or AMBIGUOUS")
+
+    def activate_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
+        attempt_id=self.begin_activation(deployment_id=deployment_id,actor_principal_id=actor_principal_id)
+        return self.reconcile_activation(
+            activation_attempt_id=attempt_id,actor_principal_id=actor_principal_id,
+            outcome="ACTIVATED",external_runtime_identity=f"studio-runtime:{uuid4().hex}",
+        )
 
     def place_safety_hold(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
         rec=self._deployment_from(self.store.get("deployment",deployment_id))
