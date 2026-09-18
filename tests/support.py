@@ -7,6 +7,23 @@ from ra_agent_studio.infra.factory import (
     FACTORY_V111_COMMIT,
     FactoryBuildResult,
 )
+from ra_agent_studio.infra.runtime import ExternalRuntimeResult
+
+
+class ContractTestRuntimeLauncher:
+    def launch(self, *, deployment_id: str, realization: dict) -> ExternalRuntimeResult:
+        return ExternalRuntimeResult("ACTIVATED", f"test-runtime:{deployment_id}", "test provider confirmed launch")
+
+    def stop(self, *, deployment_id: str, external_runtime_identity: str) -> ExternalRuntimeResult:
+        return ExternalRuntimeResult("STOPPED", external_runtime_identity, "test provider confirmed stop")
+
+
+class AmbiguousTestRuntimeLauncher:
+    def launch(self, *, deployment_id: str, realization: dict) -> ExternalRuntimeResult:
+        return ExternalRuntimeResult("AMBIGUOUS", "", "provider response lost")
+
+    def stop(self, *, deployment_id: str, external_runtime_identity: str) -> ExternalRuntimeResult:
+        return ExternalRuntimeResult("AMBIGUOUS", external_runtime_identity, "provider response lost")
 
 
 class ContractTestFactoryRuntime:
@@ -50,7 +67,11 @@ def authority_registry() -> AuthorityRegistry:
         AuthorityGrant(
             "grant-build",
             "builder",
-            frozenset({AuthorityScope.BUILD}),
+            frozenset({
+                AuthorityScope.DESIGN_AUTHORING,
+                AuthorityScope.IMPLEMENTATION_AUTHORING,
+                AuthorityScope.BUILD,
+            }),
             "ws",
         )
     )
