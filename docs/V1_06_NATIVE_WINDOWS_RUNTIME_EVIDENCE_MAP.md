@@ -1,58 +1,95 @@
 # RA Agent Studio v1.06 — Native Windows Runtime Targeted Implementation Evidence Map
 
-Status: IMPLEMENTATION CANDIDATE PREPARATION
+Status: REVISED IMPLEMENTATION CANDIDATE PREPARATION
 
-## Change purpose
+## Review basis
 
-RA Agent Studio v1.05 is system-accepted. Its controlled execution boundary is OCI-only and intentionally fails closed when Docker/Podman is absent.
+Prior targeted review:
+`RA_AGENT_STUDIO_v1_06_TARGETED_IMPLEMENTATION_REVIEW_v1_01_FAIL`
 
-v1.06 adds a second explicit controlled-execution provider for native Windows so the installed desktop release can run without Docker Desktop while preserving the authoritative Studio/Factory/domain semantics.
+Authorized reopen scope is limited to the Windows-native controlled-execution implementation plus directly required tests/evidence. Architecture, Factory v1.11, frontend, API command plane, review/freeze/promotion semantics, persistence, deployment state machine, and accepted v1.05 baseline remain closed.
 
-## Authorized / intended change surface
+## Blocker-directed repair
 
-Implementation delta is intentionally narrow:
+### V106-B01 — host resource isolation
 
-- `src/ra_agent_studio/infra/execution.py`
-- `src/ra_agent_studio/application/studio.py`
-- directly required Windows-native tests/evidence/packaging metadata
+Repair: Windows-native mutable module execution now runs inside a no-capability Windows AppContainer.
 
-No Factory v1.11 code, authority semantics, B12 command plane, review/freeze/promotion semantics, deployment state machine, persistence model, frontend, or API route is changed.
+The AppContainer removes ambient same-user host authority. The only resources explicitly brokered are:
 
-## Windows-native controlled execution boundary
+- dedicated Python runtime directory: RX only;
+- per-execution disposable sandbox directory: Modify;
+- inherited Windows platform resources required for process startup.
 
-The provider is explicit: `RA_STUDIO_CONTROLLED_EXECUTION_PROVIDER=windows-native`.
+No broad filesystem capability or network capability is granted.
 
-It requires a dedicated sandbox Python interpreter and a Windows Firewall outbound-block rule bound to that exact executable. It fails closed if the rule is absent or mismatched.
+Adversarial tests prove the module cannot:
 
-Each execution:
+- read a host sentinel outside the sandbox;
+- modify a host sentinel outside the sandbox;
+- read/modify a host HKCU registry sentinel.
 
-1. uses isolated Python mode `-I -S`;
-2. receives only an allowlisted environment (no parent secrets);
-3. runs from a disposable working directory;
-4. marks the exact module source read-only;
-5. is placed in a Windows Job Object;
-6. enforces active-process limit = 1;
-7. enforces process-memory limit = 128 MiB;
-8. kills the entire Job Object on timeout;
-9. requires outbound network to be blocked by the installer-provisioned Windows Firewall rule.
+The host sentinel remains unchanged after attempted access.
 
-The provider does not silently fall back to an unsafe host subprocess.
+### V106-B02 — pre-assignment execution race
 
-## Test obligations
+Repair: the native module process is created using:
 
-Windows-native CI must demonstrate:
+- `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` with the AppContainer SID;
+- `CREATE_SUSPENDED`;
+- Windows Job Object with active-process limit = 1, 128 MiB process-memory limit, and kill-on-close.
 
-- API initialization with the native provider;
-- exact stdin/stdout module execution;
-- parent secret environment is not inherited;
-- outbound network connection is blocked;
-- child process creation is blocked by the Job Object;
-- missing firewall guard fails closed.
+The startup order is fail-closed:
 
-The existing cumulative Linux/OCI regression remains required to prove the new provider does not regress the accepted v1.05 path.
+`CreateProcessW(CREATE_SUSPENDED + AppContainer) -> configure/attach Job Object -> verify success -> ResumeThread`.
+
+On any creation, AppContainer, Job assignment, or resume failure, the process is terminated and execution fails closed.
+
+An adversarial test inspects the primary thread suspend count during Job attachment and proves it remains suspended before containment is attached.
+
+## Preserved controls
+
+The provider remains explicit through `RA_STUDIO_CONTROLLED_EXECUTION_PROVIDER=windows-native`.
+
+Additional preserved controls:
+
+- Python isolated mode `-I -S`;
+- allowlisted environment only, with no inherited parent secret variables;
+- AppContainer has no network capability, so outbound network is denied;
+- active child-process count is limited by Job Object;
+- timeout terminates the Job Object;
+- no unsafe host-subprocess fallback;
+- OCI provider remains unchanged for the accepted v1.05/Linux path.
+
+## Exact revised Windows evidence
+
+Native Windows CI run:
+`35347019034`
+
+Tested source commit:
+`cc44ddef00599e5512801d230e9b1d5fc31e20c0`
+
+Evidence artifact:
+`RA_AGENT_STUDIO_v1_06_NATIVE_WINDOWS_RUNTIME_EVIDENCE`
+
+Artifact ID:
+`10547013028`
+
+Outer artifact SHA256:
+`c5be564f30bee21e54eebe55eae89a0cef61160d0bb66edb338257f2dc030d40`
+
+Observed:
+- `WINDOWS_APPCONTAINER_RUNTIME_PROVISIONED`
+- `WINDOWS_NATIVE_API_IMPORT_PASS`
+- provider identity starts with `controlled-windows-appcontainer-python-v2`
+- `10 passed`
+
+## Cumulative regression requirement
+
+The revised Candidate must also re-run the full Linux/OCI cumulative regression and must preserve all v1.05 accepted surfaces byte-for-byte outside the authorized Windows-native repair scope.
 
 ## Review / freeze boundary
 
-v1.05 remains Frozen and Accepted.
+v1.05 remains Frozen and System-Accepted.
 
-v1.06 is a new implementation Candidate. It must receive targeted implementation review before any v1.06 Software Freeze or native Windows release is treated as accepted.
+v1.06 remains an implementation Candidate only. Software Freeze is NOT authorized until the revised Candidate receives targeted external re-review PASS.
