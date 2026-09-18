@@ -9,6 +9,9 @@ import httpx
 
 
 BASE=os.environ.get("RA_STUDIO_INTEGRATION_BASE","http://127.0.0.1:8000")
+FROZEN_STUDIO_CANDIDATE_SHA256=os.environ.get("RA_STUDIO_FROZEN_CANDIDATE_SHA256","").strip().lower()
+if len(FROZEN_STUDIO_CANDIDATE_SHA256) != 64 or any(ch not in "0123456789abcdef" for ch in FROZEN_STUDIO_CANDIDATE_SHA256):
+    raise RuntimeError("RA_STUDIO_FROZEN_CANDIDATE_SHA256 must be an exact verified SHA-256 identity")
 TOKENS={
     "builder":"builder-token",
     "reviewer":"reviewer-token",
@@ -177,7 +180,7 @@ def main() -> int:
         "runtime_standing":"STOPPED",
         "factory_runtime_commit":"bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f",
         "factory_frozen_artifact_id":10334979844,
-        "studio_frozen_candidate_sha256":"046d1a159aae7ace9c1a552f20f37d14b8c19f917d6ab5b027299e1d5acb3929",
+        "studio_frozen_candidate_sha256":FROZEN_STUDIO_CANDIDATE_SHA256,
     },indent=2,sort_keys=True),encoding="utf-8")
     print("INTEGRATION_E2E_PASS")
     return 0
