@@ -1,0 +1,95 @@
+name: Freeze RA Agent Studio implementation v1.05
+
+on:
+  push:
+    branches: [software-freeze-v1_05]
+    paths:
+      - '.github/workflows/freeze_v105.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  freeze:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout freeze harness
+        uses: actions/checkout@v4
+
+      - name: Download exact approved v1.05 candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05
+          path: approved-candidate
+          repository: lyonsring-beep/ra-agent-factory-software
+          run-id: 35337630542
+          github-token: ${{ github.token }}
+
+      - name: Verify exact approved candidate identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          CANDIDATE=$(find approved-candidate -type f -name 'RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip' -print -quit)
+          test -n "$CANDIDATE"
+          echo '80f315247fd34d3cb6daec50f70588c2ad3f452eb269f4a5a5fcdb5d4aa7ea3b  '"$CANDIDATE" | sha256sum -c -
+          test "$(stat -c '%s' "$CANDIDATE")" = "129145"
+          unzip -t "$CANDIDATE" | tee candidate-integrity.txt
+
+      - name: Create exact non-mutating v1.05 software freeze bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p frozen
+          CANDIDATE=$(find approved-candidate -type f -name 'RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip' -print -quit)
+          cp "$CANDIDATE" frozen/RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip
+          cat > frozen/SOFTWARE_FREEZE_IDENTITY.txt <<'EOF'
+          product=RA Agent Studio
+          freeze_version=v1_05
+          freeze_status=SOFTWARE_FREEZE_AUTHORIZED_AND_EXECUTED
+          approved_candidate=RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip
+          approved_candidate_sha256=80f315247fd34d3cb6daec50f70588c2ad3f452eb269f4a5a5fcdb5d4aa7ea3b
+          approved_candidate_size_bytes=129145
+          approved_source_commit=ba6af729bb703e4362b6aa351f30c56560566a02
+          approved_packaging_run=35337630542
+          approved_packaging_artifact_id=10542939026
+          approved_packaging_artifact_sha256=8d34b0043fadad4cfaf7aadb6fab1abaeeb29b5f28bd2b8867510c91b91d9953
+          targeted_review=RA_AGENT_STUDIO_v1_05_FSA_B01_TARGETED_IMPLEMENTATION_REREVIEW_v1_01_PASS
+          external_review_verdict=PASS
+          fsa_b01=CLOSED
+          open_blockers=0
+          architecture_reopen=NO
+          factory_v1_11_reopen=NO
+          implementation_handoff_reopen=NO
+          backend_domain_reopen=NO
+          software_freeze=AUTHORIZED
+          EOF
+          cat > frozen/EXTERNAL_REVIEW_VERDICT.txt <<'EOF'
+          PASS — FSA-B01 CLOSED / ZERO BLOCKERS.
+          Exact RA Agent Studio v1.05 Candidate is eligible for non-mutating Software Freeze.
+          Architecture reopen: NO.
+          Factory v1.11 reopen: NO.
+          Implementation Handoff reopen: NO.
+          Backend/domain semantics reopen: NO.
+          EOF
+          sha256sum frozen/RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip frozen/SOFTWARE_FREEZE_IDENTITY.txt frozen/EXTERNAL_REVIEW_VERDICT.txt > frozen/FREEZE_MANIFEST.sha256
+          zip -X -r RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN.zip frozen >/dev/null
+          unzip -t RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN.zip | tee frozen-archive-integrity.txt
+          sha256sum RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN.sha256
+          stat -c '%s' RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN.size
+
+      - name: Upload frozen v1.05 software artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN
+          path: |
+            RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN.zip
+            RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN.sha256
+            RA_AGENT_STUDIO_IMPLEMENTATION_v1_05_FROZEN.size
+            frozen/
+            candidate-integrity.txt
+            frozen-archive-integrity.txt
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 90
