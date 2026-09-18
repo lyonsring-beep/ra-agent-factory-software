@@ -27,6 +27,10 @@ class ContractTestFactoryRuntime:
             reproducible=True,
             artifact_path="test-only://artifact",
             evidence_path="test-only://evidence",
+            artifact_bytes=artifact,
+            logical_payload_identity=ContentHash.from_bytes(b"logical:"+artifact),
+            manifest_identity=ContentHash.from_bytes(b"manifest:"+artifact),
+            factory_candidate_revision_id="factory-test-revision",
         )
 
 
