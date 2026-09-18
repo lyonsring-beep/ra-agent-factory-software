@@ -16,8 +16,8 @@ class ExternalRuntimeResult:
 
 
 class RuntimeLauncher(Protocol):
-    def launch(self, *, deployment_id: str, realization: dict) -> ExternalRuntimeResult: ...
-    def stop(self, *, deployment_id: str, external_runtime_identity: str) -> ExternalRuntimeResult: ...
+    def launch(self, *, deployment_id: str, activation_attempt_id: str, realization: dict) -> ExternalRuntimeResult: ...
+    def stop(self, *, deployment_id: str, stop_attempt_id: str, external_runtime_identity: str) -> ExternalRuntimeResult: ...
 
 
 class SubprocessRuntimeLauncher:
@@ -63,8 +63,13 @@ class SubprocessRuntimeLauncher:
             return {"standing":"AMBIGUOUS","detail":"provider returned non-JSON result"}
         return data
 
-    def launch(self, *, deployment_id: str, realization: dict) -> ExternalRuntimeResult:
-        data=self._run(self.launch_command,{"operation":"launch","deployment_id":deployment_id,"realization":realization})
+    def launch(self, *, deployment_id: str, activation_attempt_id: str, realization: dict) -> ExternalRuntimeResult:
+        data=self._run(self.launch_command,{
+            "operation":"launch","deployment_id":deployment_id,
+            "activation_attempt_id":activation_attempt_id,
+            "provider_idempotency_key":activation_attempt_id,
+            "realization":realization,
+        })
         standing=str(data.get("standing","AMBIGUOUS")).upper()
         if standing not in {"ACTIVATED","FAILED","AMBIGUOUS"}:
             standing="AMBIGUOUS"
@@ -73,9 +78,11 @@ class SubprocessRuntimeLauncher:
             return ExternalRuntimeResult("AMBIGUOUS","", "provider claimed ACTIVATED without runtime identity")
         return ExternalRuntimeResult(standing,identity,str(data.get("detail","")))
 
-    def stop(self, *, deployment_id: str, external_runtime_identity: str) -> ExternalRuntimeResult:
+    def stop(self, *, deployment_id: str, stop_attempt_id: str, external_runtime_identity: str) -> ExternalRuntimeResult:
         data=self._run(self.stop_command,{
             "operation":"stop","deployment_id":deployment_id,
+            "stop_attempt_id":stop_attempt_id,
+            "provider_idempotency_key":stop_attempt_id,
             "external_runtime_identity":external_runtime_identity,
         })
         standing=str(data.get("standing","AMBIGUOUS")).upper()
