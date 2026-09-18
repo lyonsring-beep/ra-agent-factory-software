@@ -15,6 +15,7 @@ from ra_agent_studio.domain.identity import BaselineId, CandidateId, ContentHash
 from ra_agent_studio.domain.module import ModuleAuthorityClass, ModuleEditability, ModuleRevision, ModuleRevisionState, ModuleType
 from ra_agent_studio.domain.review import ReviewBlocker, ReviewRecord, ReviewVerdict, create_review_record
 from ra_agent_studio.domain.production import ProductionEvent, ProductionRunRecord, ProductionState, transition as transition_production
+from ra_agent_studio.domain.deployment import DeploymentAuthorityRecord, DeploymentGrantStanding, GrantEvent, RuntimeDeploymentStanding, RuntimeEvent, RuntimeRealizationSnapshot, grant_next, runtime_next
 from ra_agent_studio.infra.execution import IsolatedPythonProcessExecutor
 from ra_agent_studio.infra.factory import FACTORY_V111_RUNTIME_IDENTITY, FactoryRuntime, SubprocessFactoryRuntime
 from ra_agent_studio.infra.sqlite import SQLiteStateStore
@@ -691,35 +692,164 @@ class StudioService:
             self._audit(actor_principal_id, "baseline_promoted", "baseline", baseline_id, {"lineage_id": lineage_id, "frozen_artifact_id": frozen_artifact_id, "predecessor": expected_predecessor_baseline_id, "grant_id": grant.grant_id, "fencing_token": token, "pointer_version": version, "production_state":run.current_state.value})
         return record
 
-    def deploy(self, *, deployment_id: str, frozen_artifact_id: str, actor_principal_id: str):
-        freeze = self._freeze_from(self.store.get("freeze", frozen_artifact_id))
-        candidate = self._candidate_from(self.store.get("candidate", freeze.frozen_artifact.source_candidate_id.value))
-        grant = self.authority.require_grant(actor_principal_id, AuthorityScope.DEPLOY, workspace_id=candidate.workspace_id)
+    def authorize_deployment(
+        self, *, deployment_id: str, frozen_artifact_id: str, actor_principal_id: str,
+        runtime_profile: dict, environment: dict, provider_binding: dict,
+        secret_scope: dict, permission_scope: dict, policy: dict, runtime_boundary: dict,
+    ) -> DeploymentAuthorityRecord:
+        freeze=self._freeze_from(self.store.get("freeze",frozen_artifact_id))
+        candidate=self._candidate_from(self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value))
+        grant=self.authority.require_grant(actor_principal_id,AuthorityScope.DEPLOY,workspace_id=candidate.workspace_id)
         with self.store.transaction():
-            pointer = self.store.get_pointer("current_baseline", freeze.lineage_id.value)
-            if pointer is None:
-                raise PermissionError("lineage has no current baseline")
-            current = self._baseline_from(self.store.get("baseline", pointer["value"]))
-            record = approve_deployment(
-                deployment_id=DeploymentId(deployment_id),
-                freeze=freeze,
-                current_baseline=current,
-                authority_grant_id=grant.grant_id,
-                activated_by_principal_id=actor_principal_id,
-                activated_at=datetime.now(UTC),
+            pointer=self.store.get_pointer("current_baseline",freeze.lineage_id.value)
+            if pointer is None: raise PermissionError("lineage has no current baseline")
+            current=self._baseline_from(self.store.get("baseline",pointer["value"]))
+            if current.frozen_artifact_id != freeze.frozen_artifact.id:
+                raise PermissionError("deployment target is not canonical current baseline")
+            if not all(isinstance(x,dict) and x for x in (runtime_profile,environment,provider_binding,policy,runtime_boundary)):
+                raise PermissionError("runtime profile/environment/provider/policy/boundary snapshots must be explicit and non-empty")
+            realization=RuntimeRealizationSnapshot(
+                snapshot_id=f"runtime-realization:{uuid4().hex}",target_ref=frozen_artifact_id,
+                runtime_profile=runtime_profile,environment=environment,provider_binding=provider_binding,
+                secret_scope=secret_scope,permission_scope=permission_scope,policy=policy,runtime_boundary=runtime_boundary,
             )
-            payload = {
-                "deployment_id": record.id.value,
-                "artifact_id": record.artifact_id.value,
-                "lineage_id": record.lineage_id.value,
-                "baseline_id": record.baseline_id.value,
-                "authority_grant_id": record.authority_grant_id,
-                "activated_by_principal_id": record.activated_by_principal_id,
-                "activated_at": record.activated_at.isoformat(),
+            # Conservative runtime-boundary subset: requested true/list capabilities must be admitted by policy.
+            allowed=dict(policy.get("authority_boundary",{}))
+            for key,value in runtime_boundary.items():
+                if key not in allowed or (isinstance(value,bool) and value and not bool(allowed[key])):
+                    raise PermissionError(f"runtime boundary exceeds deployment policy: {key}")
+                if isinstance(value,list) and not set(value).issubset(set(allowed.get(key,[]))):
+                    raise PermissionError(f"runtime boundary exceeds deployment policy: {key}")
+            grant_standing=grant_next(DeploymentGrantStanding.NONE,GrantEvent.GRANT_CREATED)
+            runtime_standing=runtime_next(RuntimeDeploymentStanding.NONE,RuntimeEvent.RUNTIME_DEPLOYMENT_CONSTITUTED)
+            rec=DeploymentAuthorityRecord(
+                deployment_id=deployment_id,frozen_artifact_id=frozen_artifact_id,
+                lineage_id=freeze.lineage_id.value,baseline_id=current.baseline_id.value,
+                grant_id=grant.grant_id,grant_standing=grant_standing,runtime_standing=runtime_standing,
+                realization_snapshot_id=realization.snapshot_id,realization_identity=realization.identity,
+                recovery_epoch=self.store.recovery_epoch(),current_baseline_version=int(pointer["version"]),
+            )
+            payload={
+                "deployment_id":rec.deployment_id,"frozen_artifact_id":rec.frozen_artifact_id,
+                "lineage_id":rec.lineage_id,"baseline_id":rec.baseline_id,"grant_id":rec.grant_id,
+                "grant_standing":rec.grant_standing.value,"runtime_standing":rec.runtime_standing.value,
+                "realization_snapshot_id":rec.realization_snapshot_id,"realization_identity":rec.realization_identity,
+                "recovery_epoch":rec.recovery_epoch,"current_baseline_version":rec.current_baseline_version,
+                "activation_result_ref":"","safety_hold":False,"revocation_reason":"",
             }
-            self.store.add("deployment", deployment_id, payload)
-            self._audit(actor_principal_id, "deployment_activated", "deployment", deployment_id, {"frozen_artifact_id": frozen_artifact_id, "baseline_id": current.baseline_id.value, "grant_id": grant.grant_id})
-        return record
+            self.store.add("deployment",deployment_id,payload)
+            self.store.add_immutable("runtime_realization",realization.snapshot_id,{
+                "identity":realization.identity,"target_ref":frozen_artifact_id,
+                "runtime_profile":runtime_profile,"environment":environment,"provider_binding":provider_binding,
+                "secret_scope":secret_scope,"permission_scope":permission_scope,"policy":policy,
+                "runtime_boundary":runtime_boundary,
+            })
+            self._audit(actor_principal_id,"deployment_authorized","deployment",deployment_id,{
+                "target":frozen_artifact_id,"baseline":current.baseline_id.value,
+                "realization_identity":realization.identity,"grant_id":grant.grant_id,
+            })
+        return rec
+
+    @staticmethod
+    def _deployment_from(data: dict) -> DeploymentAuthorityRecord:
+        return DeploymentAuthorityRecord(
+            deployment_id=data["deployment_id"],frozen_artifact_id=data["frozen_artifact_id"],
+            lineage_id=data["lineage_id"],baseline_id=data["baseline_id"],grant_id=data["grant_id"],
+            grant_standing=DeploymentGrantStanding(data["grant_standing"]),
+            runtime_standing=RuntimeDeploymentStanding(data["runtime_standing"]),
+            realization_snapshot_id=data["realization_snapshot_id"],realization_identity=data["realization_identity"],
+            recovery_epoch=int(data["recovery_epoch"]),current_baseline_version=int(data["current_baseline_version"]),
+            activation_result_ref=data.get("activation_result_ref",""),safety_hold=bool(data.get("safety_hold",False)),
+            revocation_reason=data.get("revocation_reason",""),
+        )
+
+    def _save_deployment(self, rec: DeploymentAuthorityRecord) -> None:
+        self.store.put("deployment",rec.deployment_id,{
+            "deployment_id":rec.deployment_id,"frozen_artifact_id":rec.frozen_artifact_id,
+            "lineage_id":rec.lineage_id,"baseline_id":rec.baseline_id,"grant_id":rec.grant_id,
+            "grant_standing":rec.grant_standing.value,"runtime_standing":rec.runtime_standing.value,
+            "realization_snapshot_id":rec.realization_snapshot_id,"realization_identity":rec.realization_identity,
+            "recovery_epoch":rec.recovery_epoch,"current_baseline_version":rec.current_baseline_version,
+            "activation_result_ref":rec.activation_result_ref,"safety_hold":rec.safety_hold,
+            "revocation_reason":rec.revocation_reason,
+        })
+
+    def activate_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
+        rec=self._deployment_from(self.store.get("deployment",deployment_id))
+        freeze=self._freeze_from(self.store.get("freeze",rec.frozen_artifact_id))
+        candidate=self._candidate_from(self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value))
+        self.authority.require_grant(actor_principal_id,AuthorityScope.DEPLOY,workspace_id=candidate.workspace_id)
+        with self.store.transaction():
+            rec=self._deployment_from(self.store.get("deployment",deployment_id))
+            if rec.recovery_epoch != self.store.recovery_epoch(): raise PermissionError("STALE_RECOVERY_EPOCH")
+            pointer=self.store.get_pointer("current_baseline",rec.lineage_id)
+            if pointer is None or pointer["value"] != rec.baseline_id or int(pointer["version"]) != rec.current_baseline_version:
+                raise PermissionError("activation-time target currentness assessment failed")
+            if rec.grant_standing is not DeploymentGrantStanding.ACTIVE or rec.safety_hold:
+                raise PermissionError("activation-time grant/safety standing invalid")
+            realization=self.store.get_immutable("runtime_realization",rec.realization_snapshot_id)
+            if realization["identity"] != rec.realization_identity:
+                raise PermissionError("runtime realization drift")
+            activating=runtime_next(rec.runtime_standing,RuntimeEvent.ACTIVATION_REQUESTED,"ACTIVATION_ADMISSIBLE")
+            rec=replace(rec,runtime_standing=activating)
+            self._save_deployment(rec)
+            # Runtime launch is represented by an immutable activation result; provider side-effects
+            # are outside Studio and must be reconciled against this attempt identity.
+            activation_ref=f"activation-result:{uuid4().hex}"
+            self.store.add_immutable("activation_result",activation_ref,{
+                "deployment_id":deployment_id,"standing":"ACTIVATED",
+                "realization_identity":rec.realization_identity,"recovery_epoch":rec.recovery_epoch,
+            })
+            active=runtime_next(rec.runtime_standing,RuntimeEvent.ACTIVATED)
+            rec=replace(rec,runtime_standing=active,activation_result_ref=activation_ref)
+            self._save_deployment(rec)
+            self._audit(actor_principal_id,"runtime_activated","deployment",deployment_id,{"activation_result_ref":activation_ref})
+        return rec
+
+    def place_safety_hold(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
+        rec=self._deployment_from(self.store.get("deployment",deployment_id))
+        freeze=self._freeze_from(self.store.get("freeze",rec.frozen_artifact_id))
+        candidate=self._candidate_from(self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value))
+        self.authority.require_grant(actor_principal_id,AuthorityScope.HOLD_DEPLOYMENT,workspace_id=candidate.workspace_id)
+        with self.store.transaction():
+            rec=self._deployment_from(self.store.get("deployment",deployment_id))
+            grant=grant_next(rec.grant_standing,GrantEvent.SAFETY_HOLD_PLACED)
+            runtime=runtime_next(rec.runtime_standing,RuntimeEvent.SAFETY_HOLD_PLACED)
+            rec=replace(rec,grant_standing=grant,runtime_standing=runtime,safety_hold=True)
+            self._save_deployment(rec)
+            self._audit(actor_principal_id,"deployment_safety_hold","deployment",deployment_id,{})
+        return rec
+
+    def revoke_deployment(self, *, deployment_id: str, actor_principal_id: str, reason: str) -> DeploymentAuthorityRecord:
+        rec=self._deployment_from(self.store.get("deployment",deployment_id))
+        freeze=self._freeze_from(self.store.get("freeze",rec.frozen_artifact_id))
+        candidate=self._candidate_from(self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value))
+        self.authority.require_grant(actor_principal_id,AuthorityScope.REVOKE_DEPLOYMENT,workspace_id=candidate.workspace_id)
+        with self.store.transaction():
+            rec=self._deployment_from(self.store.get("deployment",deployment_id))
+            grant=grant_next(rec.grant_standing,GrantEvent.GRANT_REVOKED)
+            condition="REVOKE_RUNNING" if rec.runtime_standing is RuntimeDeploymentStanding.ACTIVE else "DEFAULT"
+            runtime=runtime_next(rec.runtime_standing,RuntimeEvent.GRANT_REVOKED,condition)
+            rec=replace(rec,grant_standing=grant,runtime_standing=runtime,revocation_reason=reason)
+            self._save_deployment(rec)
+            self._audit(actor_principal_id,"deployment_revoked","deployment",deployment_id,{"reason":reason})
+        return rec
+
+    def stop_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
+        rec=self._deployment_from(self.store.get("deployment",deployment_id))
+        with self.store.transaction():
+            rec=self._deployment_from(self.store.get("deployment",deployment_id))
+            stopping=runtime_next(rec.runtime_standing,RuntimeEvent.STOP_REQUESTED)
+            rec=replace(rec,runtime_standing=stopping)
+            self._save_deployment(rec)
+            stopped=runtime_next(rec.runtime_standing,RuntimeEvent.STOPPED)
+            rec=replace(rec,runtime_standing=stopped)
+            self._save_deployment(rec)
+            self._audit(actor_principal_id,"runtime_stopped","deployment",deployment_id,{})
+        return rec
+
+    def deploy(self, *, deployment_id: str, frozen_artifact_id: str, actor_principal_id: str):
+        raise PermissionError("direct deploy/activate is disabled; authorize deployment with exact runtime snapshots then activate separately")
 
     def snapshot(self) -> dict:
         return {
