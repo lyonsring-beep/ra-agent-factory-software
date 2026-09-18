@@ -76,7 +76,11 @@ def test_pointer_fencing_and_expected_version_fail_closed(tmp_path: Path) -> Non
             expected_version=0,fencing_token=token1,
         )
     assert v1 == 1
+    with pytest.raises(PermissionError,match="already held"):
+        with store.transaction():
+            store.acquire_fencing_token("lineage","owner-2")
     with store.transaction():
+        store.release_promotion_lock("lineage",holder="owner-1",fencing_token=token1)
         token2=store.acquire_fencing_token("lineage","owner-2")
     with pytest.raises(PermissionError,match="stale fencing token"):
         with store.transaction():
