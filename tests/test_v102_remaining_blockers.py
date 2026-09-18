@@ -156,3 +156,81 @@ def test_closed_control_plane_rejects_dynamic_operation_and_replays_idempotently
     assert first.standing == "COMMITTED"
     assert second.standing == "REPLAYED"
     assert first.result_ref == second.result_ref
+
+
+def test_pr15_stale_baseline_routes_to_pr15r_and_requires_reconciliation(tmp_path: Path) -> None:
+    s=service(tmp_path)
+    # Establish b1 as the locked predecessor for candidate 2.
+    c1=build_candidate(s,"1")
+    r1=s.review(candidate_id=c1.candidate_id.value,reviewer_principal_id="reviewer",review_method="external_ai",passed=True)
+    f1=s.freeze(candidate_id=c1.candidate_id.value,review_id=r1.review_id,actor_principal_id="freezer")
+    s.create_baseline(
+        baseline_id="b1",lineage_id="lineage-1",frozen_artifact_id=f1.frozen_artifact.id.value,
+        expected_predecessor_baseline_id=None,actor_principal_id="promoter",
+    )
+
+    s.create_module_revision(
+        module_id="m2",revision_id="r2",name="M2",content="print('two')",
+        actor_principal_id="builder",provided_capabilities=("answer",),identity_domain="d2",
+    )
+    s.compose("c2",["r2"],actor_principal_id="builder")
+    _,c2=s.build(
+        "c2",actor_principal_id="builder",workspace_id="ws",lineage_id="lineage-1",
+        predecessor_baseline_id="b1",
+    )
+    r2=s.review(candidate_id=c2.candidate_id.value,reviewer_principal_id="reviewer",review_method="external_ai",passed=True)
+
+    # Promote a different accepted lineage target after c2 review, making c2's locked predecessor stale.
+    s.create_module_revision(
+        module_id="m3",revision_id="r3",name="M3",content="print('three')",
+        actor_principal_id="builder",provided_capabilities=("answer",),identity_domain="d3",
+    )
+    s.compose("c3",["r3"],actor_principal_id="builder")
+    _,c3=s.build(
+        "c3",actor_principal_id="builder",workspace_id="ws",lineage_id="lineage-1",
+        predecessor_baseline_id="b1",
+    )
+    r3=s.review(candidate_id=c3.candidate_id.value,reviewer_principal_id="reviewer",review_method="external_ai",passed=True)
+    f3=s.freeze(candidate_id=c3.candidate_id.value,review_id=r3.review_id,actor_principal_id="freezer")
+    s.create_baseline(
+        baseline_id="b2",lineage_id="lineage-1",frozen_artifact_id=f3.frozen_artifact.id.value,
+        expected_predecessor_baseline_id="b1",actor_principal_id="promoter",
+    )
+
+    with pytest.raises(PermissionError,match="STALE_BASELINE"):
+        s.freeze(candidate_id=c2.candidate_id.value,review_id=r2.review_id,actor_principal_id="freezer")
+    run=s.store.get("production_run",f"production-run:{c2.candidate_id.value}")
+    assert run["current_state"] == ProductionState.PR_15R_BASELINE_RECONCILIATION_REQUIRED.value
+    reconciled=s.reconcile_stale_baseline(
+        candidate_id=c2.candidate_id.value,actor_principal_id="builder",no_design_change=True,
+    )
+    assert reconciled.current_state is ProductionState.PR_09_IMPLEMENTATION_CANDIDATE
+
+
+def test_superseded_active_deployment_enters_revalidation_and_can_be_denied(tmp_path: Path) -> None:
+    s=service(tmp_path)
+    dep=_frozen_deployment(s)
+    active=s.activate_runtime(deployment_id=dep.deployment_id,actor_principal_id="deployer")
+    assert active.runtime_standing.value == "ACTIVE"
+
+    # Make another baseline current on the same lineage.
+    s.create_module_revision(
+        module_id="next",revision_id="next-r",name="Next",content="print('next')",
+        actor_principal_id="builder",provided_capabilities=("answer",),identity_domain="next",
+    )
+    s.compose("next-c",["next-r"],actor_principal_id="builder")
+    _,cand=s.build(
+        "next-c",actor_principal_id="builder",workspace_id="ws",lineage_id="lineage-1",
+        predecessor_baseline_id="b1",
+    )
+    rev=s.review(candidate_id=cand.candidate_id.value,reviewer_principal_id="reviewer",review_method="external_ai",passed=True)
+    frz=s.freeze(candidate_id=cand.candidate_id.value,review_id=rev.review_id,actor_principal_id="freezer")
+    s.create_baseline(
+        baseline_id="b2",lineage_id="lineage-1",frozen_artifact_id=frz.frozen_artifact.id.value,
+        expected_predecessor_baseline_id="b1",actor_principal_id="promoter",
+    )
+    stale=s._deployment_from(s.store.get("deployment","d1"))
+    assert stale.grant_standing.value == "SUPERSEDED_TARGET_REVALIDATION_REQUIRED"
+    assert stale.runtime_standing.value == "REVALIDATION_REQUIRED"
+    denied=s.revalidate_deployment(deployment_id="d1",actor_principal_id="deployer",continue_active=True)
+    assert denied.runtime_standing.value == "REVALIDATION_REQUIRED"
