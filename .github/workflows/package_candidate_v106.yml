@@ -45,7 +45,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TESTED=38c68b2f339de5d025e48247fe8aced2f9a43c43
+          TESTED=cc44ddef00599e5512801d230e9b1d5fc31e20c0
           git diff --exit-code "$TESTED"...HEAD --             src/ra_agent_studio/infra/execution.py             src/ra_agent_studio/application/studio.py             tests/test_v106_native_windows_executor.py             .github/workflows/native_windows_v106.yml
           echo "NATIVE_WINDOWS_TESTED_IMPLEMENTATION_IDENTITY_PASS"
 
@@ -55,7 +55,7 @@ jobs:
           name: RA_AGENT_STUDIO_v1_06_NATIVE_WINDOWS_RUNTIME_EVIDENCE
           path: evidence/native-windows
           repository: lyonsring-beep/ra-agent-factory-software
-          run-id: 35345216792
+          run-id: 35347019034
           github-token: ${{ github.token }}
 
       - name: Install and run cumulative regression
@@ -89,9 +89,9 @@ jobs:
             echo "baseline_commit=ba6af729bb703e4362b6aa351f30c56560566a02"
             echo "baseline_frozen_candidate_sha256=80f315247fd34d3cb6daec50f70588c2ad3f452eb269f4a5a5fcdb5d4aa7ea3b"
             echo "baseline_final_acceptance_run=35340851677"
-            echo "native_windows_test_run=35345216792"
-            echo "native_windows_test_artifact_id=10546820374"
-            echo "change_scope=CONTROLLED_EXECUTION_WINDOWS_NATIVE_PROVIDER_ONLY"
+            echo "native_windows_test_run=35347019034"
+            echo "native_windows_test_artifact_id=10547013028"
+            echo "change_scope=V106_B01_HOST_RESOURCE_ISOLATION_AND_V106_B02_CONTAINMENT_FIRST_WINDOWS_NATIVE_PROVIDER_ONLY"
             echo "architecture_reopen=NO"
             echo "factory_reopen=NO"
             echo "frontend_reopen=NO"
