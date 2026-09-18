@@ -138,6 +138,9 @@ class StudioControlPlane:
         principal=c.principal_ref
 
         if op == "op:factory:module-revision-create":
+            author=self.studio.authority.principal(principal)
+            if c.workspace_ref != author.workspace_id:
+                raise PermissionError("authoring command workspace does not match bounded authoring grant workspace")
             revision=self.studio.create_module_revision(
                 module_id=str(p["module_id"]),
                 revision_id=c.exact_target_ref,
@@ -161,6 +164,9 @@ class StudioControlPlane:
             return CommandResult("COMMITTED",c.command_id,revision.revision_id.value,{"result_kind":"module_revision"})
 
         if op == "op:factory:composition-realize":
+            author=self.studio.authority.principal(principal)
+            if c.workspace_ref != author.workspace_id:
+                raise PermissionError("authoring command workspace does not match bounded authoring grant workspace")
             composition=self.studio.compose(
                 c.exact_target_ref,list(p["revision_ids"]),actor_principal_id=principal,
             )
