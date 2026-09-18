@@ -234,7 +234,7 @@ class WindowsNativePythonExecutor:
             checked=subprocess.run(
                 ["powershell.exe","-NoProfile","-NonInteractive","-Command",command],
                 capture_output=True,text=True,check=False,timeout=20,
-                env={"SystemRoot":os.environ.get("SystemRoot",r"C:\\Windows"),"PATH":os.environ.get("PATH","")},
+                env=os.environ.copy(),
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("Windows native firewall guard verification timed out") from exc
