@@ -234,3 +234,67 @@ def test_superseded_active_deployment_enters_revalidation_and_can_be_denied(tmp_
     assert stale.runtime_standing.value == "REVALIDATION_REQUIRED"
     denied=s.revalidate_deployment(deployment_id="d1",actor_principal_id="deployer",continue_active=True)
     assert denied.runtime_standing.value == "REVALIDATION_REQUIRED"
+
+
+def test_b08_b09_explicit_authority_records_and_publication_standing(tmp_path: Path) -> None:
+    s=service(tmp_path)
+    candidate=build_candidate(s)
+    contribution=s.store.get_immutable(
+        "contribution_record",f"{candidate.candidate_id.value}:builder"
+    )
+    assert contribution["exact_candidate_hash"] == candidate.candidate_hash.value
+    assert contribution["workspace_id"] == "ws"
+    publication=s.store.get_immutable("cross_store_publication",candidate.candidate_id.value)
+    assert publication["publication_standing"] == "AUTHORITATIVELY_PUBLISHED"
+    assert publication["integrity_standing"] == "VERIFIED"
+    closure=s.store.get_immutable("candidate_closure",candidate.candidate_id.value)
+    assert closure["container_identity"] == candidate.candidate_hash.value
+
+    review=s.review(
+        candidate_id=candidate.candidate_id.value,reviewer_principal_id="reviewer",
+        review_method="external_ai",passed=True,
+    )
+    submission=s.store.get_immutable("review_submission",review.review_id)
+    assert submission["candidate_hash"] == candidate.candidate_hash.value
+    assert submission["reviewer_workspace_id"] == "review-ws"
+    eligibility=s.store.get_immutable("b09_closure_eligibility",candidate.candidate_id.value)
+    basis=eligibility["review_accepted_transport_basis"]
+    assert basis["container_identity"] == candidate.candidate_hash.value
+    assert basis["logical_payload_identity"] == candidate.logical_payload_identity.value
+    assert basis["manifest_identity"] == candidate.manifest_identity.value
+
+    frozen=s.freeze(
+        candidate_id=candidate.candidate_id.value,review_id=review.review_id,
+        actor_principal_id="freezer",
+    )
+    freeze_closure=s.store.get_immutable("freeze_closure",frozen.frozen_artifact.id.value)
+    assert freeze_closure["freeze_custody_workspace"] == "ws"
+    assert freeze_closure["canonical_promotion_lock_holder"].startswith("production-run:")
+
+
+def test_controlled_execution_denies_rootfs_write_and_binds_policy_identity(tmp_path: Path) -> None:
+    from ra_agent_studio.domain.effect import EffectFixture
+
+    s=service(tmp_path)
+    code=(
+        "from pathlib import Path\n"
+        "try:\n"
+        "    Path('/should-not-write').write_text('x')\n"
+        "    print('rootfs=WRITABLE')\n"
+        "except Exception:\n"
+        "    print('rootfs=BLOCKED')\n"
+    )
+    revision=s.create_module_revision(
+        module_id="fs-hostile",revision_id="fs-r1",name="FS Hostile",content=code,
+        actor_principal_id="builder",provided_capabilities=("answer",),identity_domain="fs-hostile",
+    )
+    fixture=EffectFixture("fs-hostile-fixture","",("rootfs=BLOCKED",))
+    observation=s.run_effect_fixture(revision.revision_id.value,fixture)
+    assert observation.passed is True
+    assert len(observation.metadata["execution_policy_identity"]) == 64
+    assert len(observation.metadata["environment_identity"]) == 64
+    evidence=s.store.get_immutable(
+        "controlled_execution_observation",f"{revision.revision_id.value}:{fixture.fixture_identity}"
+    )
+    assert evidence["execution_policy_identity"] == observation.metadata["execution_policy_identity"]
+    assert evidence["termination_reason"] == "completed"
