@@ -60,6 +60,22 @@ class IsolatedPythonProcessExecutor:
         self.execution_policy_identity=sha256(canonical).hexdigest()
         self.environment_identity=sha256(f"{self.runtime}|{self.image}".encode()).hexdigest()
         self.identity=f"controlled-oci-python-v2:{self.environment_identity[:16]}:{self.execution_policy_identity[:16]}"
+        self._ensure_image()
+
+    def _ensure_image(self) -> None:
+        inspect = subprocess.run(
+            [self.runtime, "image", "inspect", self.image],
+            capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "")}, check=False,
+        )
+        if inspect.returncode == 0:
+            return
+        pulled = subprocess.run(
+            [self.runtime, "pull", self.image],
+            capture_output=True, text=True, timeout=180,
+            env={"PATH": os.environ.get("PATH", "")}, check=False,
+        )
+        if pulled.returncode != 0:
+            raise RuntimeError(f"controlled execution image unavailable: {pulled.stderr.strip()}")
 
     @staticmethod
     def _detect_runtime() -> str | None:
