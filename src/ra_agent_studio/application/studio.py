@@ -12,7 +12,7 @@ from ra_agent_studio.domain.effect import EffectFixture, TestDelta, TestObservat
 from ra_agent_studio.domain.evidence import BuildEvidence
 from ra_agent_studio.domain.governance import BaselineRecord, FreezeRecord, approve_deployment, designate_baseline, freeze_candidate
 from ra_agent_studio.domain.identity import BaselineId, CandidateId, ContentHash, DeploymentId, FrozenArtifactId, LineageId, ModuleId, RevisionId
-from ra_agent_studio.domain.module import ModuleRevision, ModuleRevisionState
+from ra_agent_studio.domain.module import ModuleAuthorityClass, ModuleEditability, ModuleRevision, ModuleRevisionState, ModuleType
 from ra_agent_studio.domain.review import ReviewBlocker, ReviewRecord, ReviewVerdict, create_review_record
 from ra_agent_studio.infra.execution import IsolatedPythonProcessExecutor
 from ra_agent_studio.infra.factory import FACTORY_V111_RUNTIME_IDENTITY, FactoryRuntime, SubprocessFactoryRuntime
@@ -57,6 +57,12 @@ class StudioService:
             "identity_domain": item.identity_domain,
             "config_json": item.config_json,
             "config_hash": item.config_hash.value if item.config_hash else None,
+            "module_type": item.module_type.value,
+            "authority_class": item.authority_class.value,
+            "editability": item.editability.value,
+            "agent_requirement_ref": item.agent_requirement_ref,
+            "agent_authority_boundary_ref": item.agent_authority_boundary_ref,
+            "shared_change_authorization_ref": item.shared_change_authorization_ref,
         }
 
     @staticmethod
@@ -77,6 +83,12 @@ class StudioService:
             identity_domain=data.get("identity_domain", ""),
             config_json=data.get("config_json", "{}"),
             config_hash=ContentHash(data["config_hash"]) if data.get("config_hash") else None,
+            module_type=ModuleType(data.get("module_type", ModuleType.AGENT_SPECIFIC_EXTENSION_MODULE.value)),
+            authority_class=ModuleAuthorityClass(data.get("authority_class", ModuleAuthorityClass.FACTORY_AGENT_SPECIFIC.value)),
+            editability=ModuleEditability(data.get("editability", ModuleEditability.AGENT_EDITABLE.value)),
+            agent_requirement_ref=data.get("agent_requirement_ref", "ra-agent-studio:legacy-requirement"),
+            agent_authority_boundary_ref=data.get("agent_authority_boundary_ref", "ra-agent-studio:legacy-boundary"),
+            shared_change_authorization_ref=data.get("shared_change_authorization_ref", ""),
         )
 
     @staticmethod
@@ -84,6 +96,8 @@ class StudioService:
         return {
             "composition_id": item.composition_id,
             "composition_hash": item.composition_hash.value,
+            "agent_requirement_ref": item.agent_requirement_ref,
+            "agent_authority_boundary_ref": item.agent_authority_boundary_ref,
             "bindings": [
                 {
                     "module_id": b.module_id.value,
@@ -95,6 +109,12 @@ class StudioService:
                     "incompatible_module_ids": [x.value for x in b.incompatible_module_ids],
                     "identity_domain": b.identity_domain,
                     "config_hash": b.config_hash.value if b.config_hash else None,
+                    "module_type": b.module_type.value,
+                    "authority_class": b.authority_class.value,
+                    "editability": b.editability.value,
+                    "agent_requirement_ref": b.agent_requirement_ref,
+                    "agent_authority_boundary_ref": b.agent_authority_boundary_ref,
+                    "shared_change_authorization_ref": b.shared_change_authorization_ref,
                 }
                 for b in item.bindings
             ],
@@ -113,10 +133,20 @@ class StudioService:
                 incompatible_module_ids=tuple(ModuleId(x) for x in b.get("incompatible_module_ids", [])),
                 identity_domain=b.get("identity_domain", ""),
                 config_hash=ContentHash(b["config_hash"]) if b.get("config_hash") else None,
+                module_type=ModuleType(b.get("module_type", ModuleType.AGENT_SPECIFIC_EXTENSION_MODULE.value)),
+                authority_class=ModuleAuthorityClass(b.get("authority_class", ModuleAuthorityClass.FACTORY_AGENT_SPECIFIC.value)),
+                editability=ModuleEditability(b.get("editability", ModuleEditability.AGENT_EDITABLE.value)),
+                agent_requirement_ref=b.get("agent_requirement_ref", data.get("agent_requirement_ref", "")),
+                agent_authority_boundary_ref=b.get("agent_authority_boundary_ref", data.get("agent_authority_boundary_ref", "")),
+                shared_change_authorization_ref=b.get("shared_change_authorization_ref", ""),
             )
             for b in data["bindings"]
         )
-        return RealizedAgentComposition(data["composition_id"], bindings, ContentHash(data["composition_hash"]))
+        return RealizedAgentComposition(
+            data["composition_id"], bindings, ContentHash(data["composition_hash"]),
+            data.get("agent_requirement_ref", bindings[0].agent_requirement_ref if bindings else ""),
+            data.get("agent_authority_boundary_ref", bindings[0].agent_authority_boundary_ref if bindings else ""),
+        )
 
     @staticmethod
     def _candidate_payload(item: CandidateRecord) -> dict:
@@ -274,6 +304,12 @@ class StudioService:
         incompatible_module_ids: tuple[str, ...] = (),
         identity_domain: str = "",
         config_json: str = "{}",
+        module_type: str = ModuleType.AGENT_SPECIFIC_EXTENSION_MODULE.value,
+        authority_class: str = ModuleAuthorityClass.FACTORY_AGENT_SPECIFIC.value,
+        editability: str = ModuleEditability.AGENT_EDITABLE.value,
+        agent_requirement_ref: str = "ra-agent-studio:default-requirement",
+        agent_authority_boundary_ref: str = "ra-agent-studio:default-authority-boundary",
+        shared_change_authorization_ref: str = "",
     ) -> ModuleRevision:
         revision = ModuleRevision.create(
             ModuleId(module_id),
@@ -288,6 +324,12 @@ class StudioService:
             incompatible_module_ids=tuple(ModuleId(x) for x in incompatible_module_ids),
             identity_domain=identity_domain,
             config_json=config_json,
+            module_type=ModuleType(module_type),
+            authority_class=ModuleAuthorityClass(authority_class),
+            editability=ModuleEditability(editability),
+            agent_requirement_ref=agent_requirement_ref,
+            agent_authority_boundary_ref=agent_authority_boundary_ref,
+            shared_change_authorization_ref=shared_change_authorization_ref,
         )
         with self.store.transaction():
             if predecessor_revision_id:
@@ -340,6 +382,12 @@ class StudioService:
                     revision.incompatible_module_ids,
                     revision.identity_domain,
                     revision.config_hash,
+                    revision.module_type,
+                    revision.authority_class,
+                    revision.editability,
+                    revision.agent_requirement_ref,
+                    revision.agent_authority_boundary_ref,
+                    revision.shared_change_authorization_ref,
                 )
             )
         composition = realize_composition(composition_id, tuple(bindings))
