@@ -122,6 +122,11 @@ class SubprocessFactoryRuntime:
             "studio_composition_hash": composition.composition_hash.value,
             "agent_requirement_ref": composition.agent_requirement_ref,
             "agent_authority_boundary_ref": composition.agent_authority_boundary_ref,
+            "capability_bindings": [
+                {"capability": capability, "studio_revision_id": revision_id.value}
+                for capability, revision_id in composition.capability_bindings
+            ],
+            "capability_binding_identity": composition.capability_binding_identity.value if composition.capability_binding_identity else None,
             "bindings": request_bindings,
         }
         with tempfile.TemporaryDirectory(prefix="ra-studio-factory-") as temp_dir:
