@@ -10,6 +10,8 @@ import os
 
 
 class AuthorityScope(StrEnum):
+    DESIGN_AUTHORING = "design_authoring"
+    IMPLEMENTATION_AUTHORING = "implementation_authoring"
     REVIEW = "review"
     FREEZE = "freeze"
     PROMOTE_BASELINE = "promote_baseline"
