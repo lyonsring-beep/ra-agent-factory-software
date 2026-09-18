@@ -38,6 +38,8 @@ class RealizedAgentComposition:
     composition_hash: ContentHash
     agent_requirement_ref: str
     agent_authority_boundary_ref: str
+    capability_bindings: tuple[tuple[str, RevisionId], ...] = ()
+    capability_binding_identity: ContentHash | None = None
 
 
 def assess_compatibility(bindings: tuple[ModuleBinding, ...]) -> tuple[CompatibilityIssue, ...]:
@@ -63,10 +65,22 @@ def assess_compatibility(bindings: tuple[ModuleBinding, ...]) -> tuple[Compatibi
             issues.append(CompatibilityIssue("authority_class_violation", f"{binding.module_id.value} agent-specific authority was relabeled"))
 
     all_capabilities = {cap for binding in bindings for cap in binding.provided_capabilities}
+    providers_by_capability: dict[str, list[ModuleBinding]] = {}
+    for provider_binding in bindings:
+        for capability in provider_binding.provided_capabilities:
+            providers_by_capability.setdefault(capability, []).append(provider_binding)
     for binding in bindings:
         missing_caps = sorted(set(binding.required_capabilities) - all_capabilities)
         if missing_caps:
             issues.append(CompatibilityIssue("missing_capability", f"{binding.module_id.value} requires capabilities: {', '.join(missing_caps)}"))
+        for capability in binding.required_capabilities:
+            providers=providers_by_capability.get(capability,[])
+            if len(providers) > 1:
+                issues.append(CompatibilityIssue(
+                    "ambiguous_capability_provider",
+                    f"{binding.module_id.value} capability {capability} has multiple providers: " +
+                    ", ".join(sorted(p.module_id.value for p in providers)),
+                ))
         for required in binding.required_module_ids:
             if required.value not in by_module:
                 issues.append(CompatibilityIssue("missing_required_module", f"{binding.module_id.value} requires module {required.value}"))
@@ -111,16 +125,33 @@ def realize_composition(composition_id: str, bindings: tuple[ModuleBinding, ...]
     if issues:
         detail = "; ".join(f"{issue.code}: {issue.message}" for issue in issues)
         raise ValueError(f"composition compatibility failed: {detail}")
-    canonical = "\n".join(
-        ":".join([
-            b.module_id.value, b.revision_id.value, b.content_hash.value,
-            b.config_hash.value if b.config_hash else "",
-            ",".join(sorted(b.provided_capabilities)), ",".join(sorted(b.required_capabilities)),
-            ",".join(sorted(x.value for x in b.required_module_ids)), b.identity_domain,
-            b.module_type.value, b.authority_class.value, b.editability.value,
-            b.agent_requirement_ref, b.agent_authority_boundary_ref, b.shared_change_authorization_ref,
-        ])
-        for b in sorted(bindings, key=lambda item: item.module_id.value)
+    providers_by_capability: dict[str, list[ModuleBinding]] = {}
+    required_capabilities: set[str] = set()
+    for binding in bindings:
+        required_capabilities.update(binding.required_capabilities)
+        for capability in binding.provided_capabilities:
+            providers_by_capability.setdefault(capability, []).append(binding)
+    capability_bindings=tuple(
+        (capability, providers_by_capability[capability][0].revision_id)
+        for capability in sorted(required_capabilities)
+    )
+    capability_binding_bytes="\n".join(
+        f"{capability}:{revision_id.value}" for capability,revision_id in capability_bindings
+    ).encode("utf-8")
+    capability_binding_identity=ContentHash.from_bytes(capability_binding_bytes)
+    canonical = (
+        "\n".join(
+            ":".join([
+                b.module_id.value, b.revision_id.value, b.content_hash.value,
+                b.config_hash.value if b.config_hash else "",
+                ",".join(sorted(b.provided_capabilities)), ",".join(sorted(b.required_capabilities)),
+                ",".join(sorted(x.value for x in b.required_module_ids)), b.identity_domain,
+                b.module_type.value, b.authority_class.value, b.editability.value,
+                b.agent_requirement_ref, b.agent_authority_boundary_ref, b.shared_change_authorization_ref,
+            ])
+            for b in sorted(bindings, key=lambda item: item.module_id.value)
+        )
+        + "\nCAPABILITY_BINDING_IDENTITY:" + capability_binding_identity.value
     ).encode("utf-8")
     return RealizedAgentComposition(
         composition_id=composition_id,
@@ -128,4 +159,6 @@ def realize_composition(composition_id: str, bindings: tuple[ModuleBinding, ...]
         composition_hash=ContentHash.from_bytes(canonical),
         agent_requirement_ref=bindings[0].agent_requirement_ref,
         agent_authority_boundary_ref=bindings[0].agent_authority_boundary_ref,
+        capability_bindings=capability_bindings,
+        capability_binding_identity=capability_binding_identity,
     )
