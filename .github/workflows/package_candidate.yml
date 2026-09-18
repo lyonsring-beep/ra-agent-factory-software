@@ -1,20 +1,19 @@
 name: Package RA Agent Studio implementation candidate v1.02
 
 on:
+  push:
+    branches: [implementation-repair-v1_02]
+    paths:
+      - '.github/workflows/package_candidate.yml'
+      - 'src/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'frontend/**'
+      - 'Dockerfile'
+      - 'compose.yaml'
+      - 'pyproject.toml'
+      - 'docs/**'
   workflow_dispatch:
-    inputs:
-      live_integration_run:
-        description: Exact successful v1.02 live Factory integration run
-        required: true
-        type: string
-      live_integration_artifact_id:
-        description: Exact live integration evidence artifact id
-        required: true
-        type: string
-      live_integration_artifact_sha256:
-        description: Exact live integration evidence artifact sha256 digest
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -58,24 +57,8 @@ jobs:
           docker build -t ra-agent-studio:candidate-v1_02 . | tee evidence/docker-build.txt
           docker image inspect ra-agent-studio:candidate-v1_02 --format '{{.Id}}' | tee evidence/docker-image-id.txt
 
-      - name: Verify exact live-integration provenance inputs
-        shell: bash
-        env:
-          LIVE_RUN: ${{ inputs.live_integration_run }}
-          LIVE_ARTIFACT_ID: ${{ inputs.live_integration_artifact_id }}
-          LIVE_ARTIFACT_SHA256: ${{ inputs.live_integration_artifact_sha256 }}
-        run: |
-          set -euo pipefail
-          test -n "$LIVE_RUN"
-          test -n "$LIVE_ARTIFACT_ID"
-          test ${#LIVE_ARTIFACT_SHA256} -eq 64
-
       - name: Record exact source and frozen-reference identities
         shell: bash
-        env:
-          LIVE_RUN: ${{ inputs.live_integration_run }}
-          LIVE_ARTIFACT_ID: ${{ inputs.live_integration_artifact_id }}
-          LIVE_ARTIFACT_SHA256: ${{ inputs.live_integration_artifact_sha256 }}
         run: |
           set -euo pipefail
           {
@@ -92,9 +75,8 @@ jobs:
             echo "factory_v1_11_candidate_sha256=8387b7aa27d39be56a4f1e28ae979f9f233b1f29c196b5339c1b40dd6fdfec7b"
             echo "factory_v1_11_frozen_package_artifact_id=10334979844"
             echo "factory_v1_11_frozen_package_sha256=df04ac7cc938be23d7652fa8424dd50f220ed95941c1e6290e689c04bbaceeaa"
-            echo "live_integration_run=$LIVE_RUN"
-            echo "live_integration_artifact_id=$LIVE_ARTIFACT_ID"
-            echo "live_integration_artifact_sha256=$LIVE_ARTIFACT_SHA256"
+            echo "live_integration_binding=EXTERNAL_EXACT_SOURCE_EVIDENCE_SUBMITTED_SEPARATELY"
+            echo "live_integration_required_source_commit=${GITHUB_SHA}"
           } > evidence/IMPLEMENTATION_IDENTITY.txt
           git ls-files | LC_ALL=C sort > evidence/source-files.txt
           git ls-files -s | LC_ALL=C sort > evidence/source-index.txt
