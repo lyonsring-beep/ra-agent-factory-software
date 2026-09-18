@@ -444,6 +444,10 @@ class StudioService:
             workspace_id=workspace_id,
             lineage_id=LineageId(lineage_id),
             predecessor_baseline_id=BaselineId(predecessor_baseline_id) if predecessor_baseline_id else None,
+            artifact_blob_hash=result.artifact_hash,
+            logical_payload_identity=result.logical_payload_identity,
+            manifest_identity=result.manifest_identity,
+            factory_candidate_revision_id=result.factory_candidate_revision_id,
         )
         evidence_payload = {
             "evidence_id": evidence.evidence_id,
@@ -462,8 +466,20 @@ class StudioService:
                 current = self.store.get_optional("current_baseline", lineage_id)
                 if current is None or current.get("baseline_id") != predecessor_baseline_id:
                     raise PermissionError("build predecessor is not the current lineage baseline")
+            published = self.store.publish_blob(result.artifact_bytes)
+            if published != candidate.candidate_hash.value:
+                raise RuntimeError("Factory candidate byte publication hash mismatch")
             self.store.add("evidence", evidence.evidence_id, evidence_payload)
             self.store.add("candidate", candidate.candidate_id.value, self._candidate_payload(candidate))
+            self.store.add_immutable("candidate_closure", candidate.candidate_id.value, {
+                "candidate_hash": candidate.candidate_hash.value,
+                "artifact_blob_hash": published,
+                "logical_payload_identity": candidate.logical_payload_identity.value,
+                "manifest_identity": candidate.manifest_identity.value,
+                "factory_candidate_revision_id": candidate.factory_candidate_revision_id,
+                "factory_runtime_commit": candidate.factory_runtime_commit,
+                "factory_candidate_sha256": candidate.factory_candidate_sha256,
+            })
             self._audit(actor_principal_id, "factory_build_completed", "candidate", candidate.candidate_id.value, {"candidate_hash": candidate.candidate_hash.value, "factory_commit": result.runtime_commit})
         return evidence, candidate
 
@@ -501,6 +517,14 @@ class StudioService:
     def freeze(self, *, candidate_id: str, review_id: str, actor_principal_id: str) -> FreezeRecord:
         candidate = self._candidate_from(self.store.get("candidate", candidate_id))
         review = self._review_from(self.store.get("review", review_id))
+        if not candidate.artifact_blob_hash or not candidate.logical_payload_identity or not candidate.manifest_identity:
+            raise PermissionError("candidate lacks exact B09 closure identities")
+        immutable = self.store.get_immutable("candidate_closure", candidate.candidate_id.value)
+        artifact_bytes = self.store.get_blob(candidate.artifact_blob_hash.value)
+        if ContentHash.from_bytes(artifact_bytes) != candidate.candidate_hash:
+            raise PermissionError("immutable candidate bytes no longer match reviewed candidate hash")
+        if immutable["logical_payload_identity"] != candidate.logical_payload_identity.value or immutable["manifest_identity"] != candidate.manifest_identity.value:
+            raise PermissionError("candidate closure identity drift")
         grant = self.authority.require_grant(actor_principal_id, AuthorityScope.FREEZE, workspace_id=candidate.workspace_id)
         frozen_id = FrozenArtifactId(f"frozen-{candidate.candidate_hash.value[:24]}")
         record = freeze_candidate(
@@ -513,6 +537,14 @@ class StudioService:
         )
         with self.store.transaction():
             self.store.add("freeze", frozen_id.value, self._freeze_payload(record))
+            self.store.add_immutable("freeze_closure", frozen_id.value, {
+                "candidate_id": candidate_id,
+                "candidate_hash": candidate.candidate_hash.value,
+                "artifact_blob_hash": candidate.artifact_blob_hash.value,
+                "logical_payload_identity": candidate.logical_payload_identity.value,
+                "manifest_identity": candidate.manifest_identity.value,
+                "review_id": review_id,
+            })
             self._audit(actor_principal_id, "candidate_frozen", "freeze", frozen_id.value, {"candidate_id": candidate_id, "candidate_hash": candidate.candidate_hash.value, "review_id": review_id, "grant_id": grant.grant_id})
         return record
 
@@ -529,8 +561,10 @@ class StudioService:
         candidate = self._candidate_from(self.store.get("candidate", freeze.frozen_artifact.source_candidate_id.value))
         grant = self.authority.require_grant(actor_principal_id, AuthorityScope.PROMOTE_BASELINE, workspace_id=candidate.workspace_id)
         with self.store.transaction():
-            pointer = self.store.get_optional("current_baseline", lineage_id)
-            current = self._baseline_from(self.store.get("baseline", pointer["baseline_id"])) if pointer else None
+            token = self.store.acquire_fencing_token(lineage_id, actor_principal_id)
+            pointer = self.store.get_pointer("current_baseline", lineage_id)
+            actual_baseline_id = pointer["value"] if pointer else None
+            current = self._baseline_from(self.store.get("baseline", actual_baseline_id)) if actual_baseline_id else None
             record = designate_baseline(
                 baseline_id=BaselineId(baseline_id),
                 lineage_id=LineageId(lineage_id),
@@ -542,8 +576,23 @@ class StudioService:
                 promoted_at=datetime.now(UTC),
             )
             self.store.add("baseline", baseline_id, self._baseline_payload(record))
-            self.store.put("current_baseline", lineage_id, {"baseline_id": baseline_id})
-            self._audit(actor_principal_id, "baseline_promoted", "baseline", baseline_id, {"lineage_id": lineage_id, "frozen_artifact_id": frozen_artifact_id, "predecessor": expected_predecessor_baseline_id, "grant_id": grant.grant_id})
+            version = self.store.compare_and_set_pointer(
+                "current_baseline", lineage_id,
+                expected_value=expected_predecessor_baseline_id,
+                new_value=baseline_id,
+                expected_version=int(pointer["version"]) if pointer else 0,
+                fencing_token=token,
+            )
+            self.store.put("current_baseline", lineage_id, {"baseline_id": baseline_id, "version": version, "fencing_token": token})
+            self.store.add_immutable("promotion_closure", baseline_id, {
+                "lineage_id": lineage_id,
+                "frozen_artifact_id": frozen_artifact_id,
+                "predecessor_baseline_id": expected_predecessor_baseline_id,
+                "fencing_token": token,
+                "pointer_version": version,
+                "recovery_epoch": self.store.recovery_epoch(),
+            })
+            self._audit(actor_principal_id, "baseline_promoted", "baseline", baseline_id, {"lineage_id": lineage_id, "frozen_artifact_id": frozen_artifact_id, "predecessor": expected_predecessor_baseline_id, "grant_id": grant.grant_id, "fencing_token": token, "pointer_version": version})
         return record
 
     def deploy(self, *, deployment_id: str, frozen_artifact_id: str, actor_principal_id: str):
@@ -551,10 +600,10 @@ class StudioService:
         candidate = self._candidate_from(self.store.get("candidate", freeze.frozen_artifact.source_candidate_id.value))
         grant = self.authority.require_grant(actor_principal_id, AuthorityScope.DEPLOY, workspace_id=candidate.workspace_id)
         with self.store.transaction():
-            pointer = self.store.get_optional("current_baseline", freeze.lineage_id.value)
+            pointer = self.store.get_pointer("current_baseline", freeze.lineage_id.value)
             if pointer is None:
                 raise PermissionError("lineage has no current baseline")
-            current = self._baseline_from(self.store.get("baseline", pointer["baseline_id"]))
+            current = self._baseline_from(self.store.get("baseline", pointer["value"]))
             record = approve_deployment(
                 deployment_id=DeploymentId(deployment_id),
                 freeze=freeze,
