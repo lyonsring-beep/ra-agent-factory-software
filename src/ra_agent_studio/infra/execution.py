@@ -523,14 +523,18 @@ class WindowsNativePythonExecutor:
             input_path.chmod(0o444)
             runner.chmod(0o444)
 
-            env={
-                "SystemRoot":os.environ.get("SystemRoot",r"C:\Windows"),
-                "WINDIR":os.environ.get("WINDIR",r"C:\Windows"),
+            safe_names=(
+                "SystemDrive","SystemRoot","WINDIR","COMSPEC","PATH","PATHEXT",
+                "LOCALAPPDATA","APPDATA","USERPROFILE","HOMEDRIVE","HOMEPATH",
+                "USERNAME","PROCESSOR_ARCHITECTURE","NUMBER_OF_PROCESSORS",
+            )
+            env={name:os.environ[name] for name in safe_names if name in os.environ}
+            env.update({
                 "TEMP":str(root),
                 "TMP":str(root),
                 "PYTHONIOENCODING":"utf-8",
                 "PYTHONUTF8":"1",
-            }
+            })
             started=time.monotonic()
             pi=None
             job=None
