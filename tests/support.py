@@ -11,18 +11,18 @@ from ra_agent_studio.infra.runtime import ExternalRuntimeResult
 
 
 class ContractTestRuntimeLauncher:
-    def launch(self, *, deployment_id: str, realization: dict) -> ExternalRuntimeResult:
-        return ExternalRuntimeResult("ACTIVATED", f"test-runtime:{deployment_id}", "test provider confirmed launch")
+    def launch(self, *, deployment_id: str, activation_attempt_id: str, realization: dict) -> ExternalRuntimeResult:
+        return ExternalRuntimeResult("ACTIVATED", f"test-runtime:{deployment_id}", f"test provider confirmed launch:{activation_attempt_id}")
 
-    def stop(self, *, deployment_id: str, external_runtime_identity: str) -> ExternalRuntimeResult:
+    def stop(self, *, deployment_id: str, stop_attempt_id: str, external_runtime_identity: str) -> ExternalRuntimeResult:
         return ExternalRuntimeResult("STOPPED", external_runtime_identity, "test provider confirmed stop")
 
 
 class AmbiguousTestRuntimeLauncher:
-    def launch(self, *, deployment_id: str, realization: dict) -> ExternalRuntimeResult:
+    def launch(self, *, deployment_id: str, activation_attempt_id: str, realization: dict) -> ExternalRuntimeResult:
         return ExternalRuntimeResult("AMBIGUOUS", "", "provider response lost")
 
-    def stop(self, *, deployment_id: str, external_runtime_identity: str) -> ExternalRuntimeResult:
+    def stop(self, *, deployment_id: str, stop_attempt_id: str, external_runtime_identity: str) -> ExternalRuntimeResult:
         return ExternalRuntimeResult("AMBIGUOUS", external_runtime_identity, "provider response lost")
 
 
