@@ -113,6 +113,18 @@ class DeploymentRevoke(BaseModel):
     reason: str
 
 
+class DeploymentRevalidate(BaseModel):
+    deployment_id: str
+    continue_active: bool = False
+
+
+class ActivationReconcile(BaseModel):
+    activation_attempt_id: str
+    outcome: str
+    external_runtime_identity: str = ""
+    failure_reason: str = ""
+
+
 class CommandSubmit(BaseModel):
     command_id: str
     operation_descriptor_id: str
@@ -264,6 +276,30 @@ def revoke_deployment(body: DeploymentRevoke, authorization: str | None = Header
 def stop_deployment(body: DeploymentAction, authorization: str | None = Header(default=None)):
     principal = authenticated_principal(authorization)
     return invoke(studio.stop_runtime, deployment_id=body.deployment_id, actor_principal_id=principal.principal_id)
+
+
+@app.post("/deployments/revalidate")
+def revalidate_deployment(body: DeploymentRevalidate, authorization: str | None = Header(default=None)):
+    principal = authenticated_principal(authorization)
+    return invoke(
+        studio.revalidate_deployment,
+        deployment_id=body.deployment_id,
+        actor_principal_id=principal.principal_id,
+        continue_active=body.continue_active,
+    )
+
+
+@app.post("/deployments/reconcile-activation")
+def reconcile_activation(body: ActivationReconcile, authorization: str | None = Header(default=None)):
+    principal = authenticated_principal(authorization)
+    return invoke(
+        studio.reconcile_activation,
+        activation_attempt_id=body.activation_attempt_id,
+        actor_principal_id=principal.principal_id,
+        outcome=body.outcome,
+        external_runtime_identity=body.external_runtime_identity,
+        failure_reason=body.failure_reason,
+    )
 
 
 @app.post("/commands")
