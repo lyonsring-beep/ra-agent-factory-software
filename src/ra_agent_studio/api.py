@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .application.studio import StudioService
+from .application.control_contracts import CommandEnvelope
+from .application.control_plane import StudioControlPlane
 from .domain.effect import EffectFixture
 from .domain.review import ReviewBlocker
 
@@ -19,6 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 studio = StudioService()
+control_plane = StudioControlPlane(studio)
 
 
 class ModuleCreate(BaseModel):
@@ -69,7 +72,11 @@ class ReviewBlockerInput(BaseModel):
 class ReviewCreate(BaseModel):
     candidate_id: str
     review_method: str
-    passed: bool
+    passed: bool | None = None
+    verdict: str | None = None
+    failure_class: str | None = None
+    mutation_standing: str = "UNCHANGED"
+    authorized_reopen_scope: list[str] = Field(default_factory=list)
     blockers: list[ReviewBlockerInput] = Field(default_factory=list)
 
 
@@ -104,6 +111,16 @@ class DeploymentAction(BaseModel):
 class DeploymentRevoke(BaseModel):
     deployment_id: str
     reason: str
+
+
+class CommandSubmit(BaseModel):
+    command_id: str
+    operation_descriptor_id: str
+    exact_target_ref: str
+    workspace_ref: str
+    idempotency_key: str
+    expected_recovery_epoch: int
+    payload: dict = Field(default_factory=dict)
 
 
 def invoke(fn, *args, **kwargs):
@@ -194,6 +211,10 @@ def review(body: ReviewCreate, authorization: str | None = Header(default=None))
         reviewer_principal_id=principal.principal_id,
         review_method=body.review_method,
         passed=body.passed,
+        verdict=body.verdict,
+        failure_class=body.failure_class,
+        mutation_standing=body.mutation_standing,
+        authorized_reopen_scope=tuple(body.authorized_reopen_scope),
         blockers=blockers,
     )
 
@@ -243,6 +264,22 @@ def revoke_deployment(body: DeploymentRevoke, authorization: str | None = Header
 def stop_deployment(body: DeploymentAction, authorization: str | None = Header(default=None)):
     principal = authenticated_principal(authorization)
     return invoke(studio.stop_runtime, deployment_id=body.deployment_id, actor_principal_id=principal.principal_id)
+
+
+@app.post("/commands")
+def submit_command(body: CommandSubmit, authorization: str | None = Header(default=None)):
+    principal=authenticated_principal(authorization)
+    command=CommandEnvelope(
+        command_id=body.command_id,
+        operation_descriptor_id=body.operation_descriptor_id,
+        exact_target_ref=body.exact_target_ref,
+        principal_ref=principal.principal_id,
+        workspace_ref=body.workspace_ref,
+        idempotency_key=body.idempotency_key,
+        expected_recovery_epoch=body.expected_recovery_epoch,
+        payload=body.payload,
+    )
+    return jsonable_encoder(control_plane.execute(command))
 
 
 @app.get("/snapshot")
