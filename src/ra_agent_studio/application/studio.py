@@ -1180,28 +1180,43 @@ class StudioService:
                 return rec
             raise ValueError("activation outcome must be ACTIVATED, FAILED, or AMBIGUOUS")
 
-    def launch_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
-        launcher=self.runtime_launcher or SubprocessRuntimeLauncher.from_environment()
-        attempt_id=self.begin_activation(
-            deployment_id=deployment_id,actor_principal_id=actor_principal_id
-        )
+    def execute_activation_attempt(
+        self, *, activation_attempt_id: str, actor_principal_id: str,
+    ) -> DeploymentAuthorityRecord:
+        attempt=self.store.get("activation_attempt",activation_attempt_id)
+        deployment_id=attempt["deployment_id"]
         rec=self._deployment_from(self.store.get("deployment",deployment_id))
+        if attempt["standing"] in {"ACTIVATED","FAILED"}:
+            return rec
+        launcher=self.runtime_launcher or SubprocessRuntimeLauncher.from_environment()
         realization=self.store.get_immutable("runtime_realization",rec.realization_snapshot_id)
         try:
-            external=launcher.launch(deployment_id=deployment_id,realization=realization)
+            external=launcher.launch(
+                deployment_id=deployment_id,
+                activation_attempt_id=activation_attempt_id,
+                realization=realization,
+            )
         except BaseException as exc:
             return self.reconcile_activation(
-                activation_attempt_id=attempt_id,
+                activation_attempt_id=activation_attempt_id,
                 actor_principal_id=actor_principal_id,
                 outcome="AMBIGUOUS",
                 failure_reason=f"runtime provider exception: {type(exc).__name__}: {exc}",
             )
         return self.reconcile_activation(
-            activation_attempt_id=attempt_id,
+            activation_attempt_id=activation_attempt_id,
             actor_principal_id=actor_principal_id,
             outcome=external.standing,
             external_runtime_identity=external.external_runtime_identity,
             failure_reason=external.detail,
+        )
+
+    def launch_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
+        attempt_id=self.begin_activation(
+            deployment_id=deployment_id,actor_principal_id=actor_principal_id
+        )
+        return self.execute_activation_attempt(
+            activation_attempt_id=attempt_id,actor_principal_id=actor_principal_id
         )
 
     def activate_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
