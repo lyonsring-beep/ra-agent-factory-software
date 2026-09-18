@@ -761,66 +761,118 @@ class StudioService:
         if review.subject_candidate_id != candidate.candidate_id or review.subject_hash != candidate.candidate_hash:
             raise PermissionError("review is not bound to this exact candidate/hash")
         production_run_id=f"production-run:{candidate_id}"
-        run=self._production_from(self.store.get("production_run",production_run_id))
-        if run.current_state is not ProductionState.PR_15_IMPLEMENTATION_APPROVED:
-            raise PermissionError(f"freeze requires PR-15 implementation approved, got {run.current_state.value}")
-        pointer=self.store.get_pointer("current_baseline",candidate.lineage_id.value)
-        current_baseline_id=pointer["value"] if pointer else None
-        expected_predecessor=candidate.predecessor_baseline_id.value if candidate.predecessor_baseline_id else None
-        if current_baseline_id != expected_predecessor:
-            with self.store.transaction():
-                run=self._production_from(self.store.get("production_run",production_run_id))
-                if run.current_state is ProductionState.PR_15_IMPLEMENTATION_APPROVED:
-                    run=self._transition_production(run,ProductionEvent.STALE_BASELINE_DETECTED,actor_principal_id)
-                    self._audit(actor_principal_id,"stale_baseline_detected","candidate",candidate_id,{
-                        "locked_predecessor":expected_predecessor,
-                        "current_predecessor":current_baseline_id,
-                        "production_state":run.current_state.value,
-                    })
-            raise PermissionError("STALE_BASELINE: B09 closure eligibility invalid until reconciliation")
-        eligibility=self.store.get_immutable("b09_closure_eligibility",candidate.candidate_id.value)
-        if eligibility.get("standing") != "ELIGIBLE" or eligibility.get("review_id") != review_id:
-            raise PermissionError("B09ClosureEligibility is not ELIGIBLE for this exact review/candidate")
-        if eligibility.get("candidate_hash") != candidate.candidate_hash.value:
-            raise PermissionError("B09ClosureEligibility candidate identity mismatch")
-        if not candidate.artifact_blob_hash or not candidate.logical_payload_identity or not candidate.manifest_identity:
-            raise PermissionError("candidate lacks exact B09 closure identities")
-        immutable = self.store.get_immutable("candidate_closure", candidate.candidate_id.value)
-        artifact_bytes = self.store.get_blob(candidate.artifact_blob_hash.value)
-        if ContentHash.from_bytes(artifact_bytes) != candidate.candidate_hash:
-            raise PermissionError("immutable candidate bytes no longer match reviewed candidate hash")
-        if immutable["logical_payload_identity"] != candidate.logical_payload_identity.value or immutable["manifest_identity"] != candidate.manifest_identity.value:
-            raise PermissionError("candidate closure identity drift")
-        grant = self.authority.require_grant(actor_principal_id, AuthorityScope.FREEZE, workspace_id=candidate.workspace_id)
-        frozen_id = FrozenArtifactId(f"frozen-{candidate.candidate_hash.value[:24]}")
-        record = freeze_candidate(
-            candidate=candidate,
-            frozen_artifact_id=frozen_id,
-            review=review,
-            authority_grant_id=grant.grant_id,
-            frozen_by_principal_id=actor_principal_id,
-            frozen_at=datetime.now(UTC),
+        grant = self.authority.require_grant(
+            actor_principal_id, AuthorityScope.FREEZE, workspace_id=candidate.workspace_id
         )
+        frozen_id = FrozenArtifactId(f"frozen-{candidate.candidate_hash.value[:24]}")
+        expected_predecessor=(
+            candidate.predecessor_baseline_id.value if candidate.predecessor_baseline_id else None
+        )
+        promotion_holder=production_run_id
+        stale: tuple[str | None, str | None] | None = None
+        record: FreezeRecord | None = None
+
+        # Frozen B09 ordering is deliberate:
+        # acquire same canonical promotion lock -> assess predecessor currentness ->
+        # exact freeze under that lock -> later pointer promotion -> release in create_baseline().
         with self.store.transaction():
-            promotion_holder=production_run_id
-            promotion_token=self.store.acquire_fencing_token(candidate.lineage_id.value,promotion_holder)
-            self.store.add("freeze", frozen_id.value, self._freeze_payload(record))
-            self.store.add_immutable("freeze_closure", frozen_id.value, {
-                "production_run_id": production_run_id,
-                "canonical_promotion_lock_holder": promotion_holder,
-                "canonical_promotion_fencing_token": promotion_token,
-                "locked_predecessor_baseline_id": expected_predecessor,
-                "candidate_id": candidate_id,
-                "candidate_hash": candidate.candidate_hash.value,
-                "artifact_blob_hash": candidate.artifact_blob_hash.value,
-                "logical_payload_identity": candidate.logical_payload_identity.value,
-                "manifest_identity": candidate.manifest_identity.value,
-                "review_id": review_id,
-                "freeze_custody_workspace": candidate.workspace_id,
-            })
             run=self._production_from(self.store.get("production_run",production_run_id))
-            run=self._transition_production(run,ProductionEvent.IMPLEMENTATION_FROZEN_ACCEPTED,actor_principal_id)
-            self._audit(actor_principal_id, "candidate_frozen", "freeze", frozen_id.value, {"candidate_id": candidate_id, "candidate_hash": candidate.candidate_hash.value, "review_id": review_id, "grant_id": grant.grant_id, "production_state":run.current_state.value})
+            if run.current_state is not ProductionState.PR_15_IMPLEMENTATION_APPROVED:
+                raise PermissionError(
+                    f"freeze requires PR-15 implementation approved, got {run.current_state.value}"
+                )
+            promotion_token=self.store.acquire_fencing_token(
+                candidate.lineage_id.value,promotion_holder
+            )
+            pointer=self.store.get_pointer("current_baseline",candidate.lineage_id.value)
+            current_baseline_id=pointer["value"] if pointer else None
+            if current_baseline_id != expected_predecessor:
+                run=self._transition_production(
+                    run,ProductionEvent.STALE_BASELINE_DETECTED,actor_principal_id
+                )
+                self._audit(actor_principal_id,"stale_baseline_detected","candidate",candidate_id,{
+                    "locked_predecessor":expected_predecessor,
+                    "current_predecessor":current_baseline_id,
+                    "production_state":run.current_state.value,
+                    "canonical_promotion_fencing_token":promotion_token,
+                })
+                self.store.release_promotion_lock(
+                    candidate.lineage_id.value,
+                    holder=promotion_holder,
+                    fencing_token=promotion_token,
+                )
+                stale=(expected_predecessor,current_baseline_id)
+            else:
+                eligibility=self.store.get_immutable(
+                    "b09_closure_eligibility",candidate.candidate_id.value
+                )
+                if eligibility.get("standing") != "ELIGIBLE" or eligibility.get("review_id") != review_id:
+                    raise PermissionError(
+                        "B09ClosureEligibility is not ELIGIBLE for this exact review/candidate"
+                    )
+                if eligibility.get("candidate_hash") != candidate.candidate_hash.value:
+                    raise PermissionError("B09ClosureEligibility candidate identity mismatch")
+                if (
+                    not candidate.artifact_blob_hash
+                    or not candidate.logical_payload_identity
+                    or not candidate.manifest_identity
+                ):
+                    raise PermissionError("candidate lacks exact B09 closure identities")
+                immutable=self.store.get_immutable(
+                    "candidate_closure",candidate.candidate_id.value
+                )
+                artifact_bytes=self.store.get_blob(candidate.artifact_blob_hash.value)
+                if ContentHash.from_bytes(artifact_bytes) != candidate.candidate_hash:
+                    raise PermissionError(
+                        "immutable candidate bytes no longer match reviewed candidate hash"
+                    )
+                if (
+                    immutable["logical_payload_identity"] != candidate.logical_payload_identity.value
+                    or immutable["manifest_identity"] != candidate.manifest_identity.value
+                ):
+                    raise PermissionError("candidate closure identity drift")
+
+                record=freeze_candidate(
+                    candidate=candidate,
+                    frozen_artifact_id=frozen_id,
+                    review=review,
+                    authority_grant_id=grant.grant_id,
+                    frozen_by_principal_id=actor_principal_id,
+                    frozen_at=datetime.now(UTC),
+                )
+                self.store.add("freeze",frozen_id.value,self._freeze_payload(record))
+                self.store.add_immutable("freeze_closure",frozen_id.value,{
+                    "production_run_id":production_run_id,
+                    "canonical_promotion_lock_holder":promotion_holder,
+                    "canonical_promotion_fencing_token":promotion_token,
+                    "locked_predecessor_baseline_id":expected_predecessor,
+                    "candidate_id":candidate_id,
+                    "candidate_hash":candidate.candidate_hash.value,
+                    "artifact_blob_hash":candidate.artifact_blob_hash.value,
+                    "logical_payload_identity":candidate.logical_payload_identity.value,
+                    "manifest_identity":candidate.manifest_identity.value,
+                    "review_id":review_id,
+                    "freeze_custody_workspace":candidate.workspace_id,
+                    "predecessor_currentness_assessed_under_lock":True,
+                })
+                run=self._transition_production(
+                    run,ProductionEvent.IMPLEMENTATION_FROZEN_ACCEPTED,actor_principal_id
+                )
+                self._audit(actor_principal_id,"candidate_frozen","freeze",frozen_id.value,{
+                    "candidate_id":candidate_id,
+                    "candidate_hash":candidate.candidate_hash.value,
+                    "review_id":review_id,
+                    "grant_id":grant.grant_id,
+                    "production_state":run.current_state.value,
+                    "canonical_promotion_fencing_token":promotion_token,
+                })
+
+        if stale is not None:
+            raise PermissionError(
+                "STALE_BASELINE: B09 closure eligibility invalid until reconciliation"
+            )
+        if record is None:
+            raise RuntimeError("freeze transaction completed without a freeze record")
         return record
 
     def reconcile_stale_baseline(
