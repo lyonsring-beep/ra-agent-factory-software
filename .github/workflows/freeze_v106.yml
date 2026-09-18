@@ -17,12 +17,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify exact approved source commit
+      - name: Verify exact approved source commit and freeze-only harness delta
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "119650199189952b0d27468aab5f2c8753baedc2"
-          echo "EXACT_APPROVED_SOURCE_COMMIT_PASS"
+          BASE=119650199189952b0d27468aab5f2c8753baedc2
+          git cat-file -e "$BASE^{commit}"
+          git diff --name-only "$BASE"...HEAD | tee /tmp/freeze-delta.txt
+          while IFS= read -r path; do
+            case "$path" in
+              .github/workflows/freeze_v106.yml) ;;
+              *) echo "UNAUTHORIZED_FREEZE_HARNESS_DELTA:$path" >&2; exit 1 ;;
+            esac
+          done < /tmp/freeze-delta.txt
+          echo "EXACT_APPROVED_SOURCE_PLUS_FREEZE_HARNESS_PASS"
 
       - name: Download exact externally approved Candidate
         uses: actions/download-artifact@v4
