@@ -426,12 +426,33 @@ class StudioService:
     def run_effect_fixture(self, revision_id: str, fixture: EffectFixture) -> TestObservation:
         revision = self.get_module(revision_id)
         result = self.sandbox_executor.execute(revision, fixture.input_text)
-        return evaluate_fixture(
+        observation=evaluate_fixture(
             fixture,
             revision.revision_id,
             result.output_text,
             executor_identity=result.executor_identity,
+            environment_identity=result.environment_identity,
+            execution_policy_identity=result.execution_policy_identity,
+            termination_reason=result.termination_reason,
+            exit_code=result.exit_code,
+            duration_ms=result.duration_ms,
         )
+        with self.store.transaction():
+            self.store.add_immutable("controlled_execution_observation",f"{revision_id}:{fixture.fixture_identity}",{
+                "revision_id":revision_id,
+                "module_content_hash":revision.content_hash.value,
+                "fixture_id":fixture.fixture_id,
+                "fixture_identity":fixture.fixture_identity,
+                "input_identity":observation.metadata["input_identity"],
+                "executor_identity":result.executor_identity,
+                "environment_identity":result.environment_identity,
+                "execution_policy_identity":result.execution_policy_identity,
+                "termination_reason":result.termination_reason,
+                "exit_code":result.exit_code,
+                "duration_ms":result.duration_ms,
+                "passed":observation.passed,
+            })
+        return observation
 
     def compare_effect_fixture(self, before_revision_id: str, after_revision_id: str, fixture: EffectFixture) -> TestDelta:
         before = self.run_effect_fixture(before_revision_id, fixture)
