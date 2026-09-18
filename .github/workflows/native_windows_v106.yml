@@ -1,0 +1,61 @@
+name: RA Agent Studio v1.06 Native Windows Runtime Tests
+
+on:
+  push:
+    branches: [implementation-native-windows-v1_06]
+    paths:
+      - '.github/workflows/native_windows_v106.yml'
+      - 'src/**'
+      - 'tests/test_v106_native_windows_executor.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install Studio test dependencies
+        shell: pwsh
+        run: python -m pip install -e ".[test]"
+
+      - name: Configure dedicated Windows sandbox firewall guard
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $python=(Get-Command python).Source
+          $rule="RA Agent Studio v1.06 CI Sandbox No Network"
+          Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName $rule -Direction Outbound -Action Block -Program $python -Profile Any | Out-Null
+          "RA_STUDIO_CONTROLLED_EXECUTION_PROVIDER=windows-native" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RA_STUDIO_WINDOWS_SANDBOX_PYTHON=$python" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RA_STUDIO_WINDOWS_SANDBOX_FIREWALL_RULE=$rule" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "WINDOWS_SANDBOX_FIREWALL_GUARD_CONFIGURED"
+
+      - name: Verify exact API starts with Windows-native provider
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python - <<'PY'
+          import ra_agent_studio.api
+          print("WINDOWS_NATIVE_API_IMPORT_PASS")
+          print(ra_agent_studio.api.studio.sandbox_executor.identity)
+          PY
+
+      - name: Run native Windows sandbox adversarial tests
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_v106_native_windows_executor.py
+
+      - name: Remove CI firewall guard
+        if: always()
+        shell: pwsh
+        run: |
+          Get-NetFirewallRule -DisplayName "RA Agent Studio v1.06 CI Sandbox No Network" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
