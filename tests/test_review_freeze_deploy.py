@@ -33,10 +33,12 @@ def review_for(item: CandidateRecord, verdict: ReviewVerdict) -> ReviewRecord:
         subject_candidate_id=item.candidate_id,
         subject_hash=item.candidate_hash,
         reviewer_principal_id="reviewer",
+        reviewer_workspace_id="review-ws",
         authority_grant_id="grant-review",
+        authority_source="external-review-authority",
         review_method="external_ai",
         scope="exact_candidate",
-        workspace_id="ws",
+        target_workspace_id="ws",
         verdict=verdict,
     )
 
