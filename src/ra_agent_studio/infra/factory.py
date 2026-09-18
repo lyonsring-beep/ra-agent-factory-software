@@ -23,6 +23,13 @@ FACTORY_V111_RUNTIME_IDENTITY = "ra-agent-factory-v1.11-frozen"
 FACTORY_V111_FROZEN_PACKAGE_SHA256 = "df04ac7cc938be23d7652fa8424dd50f220ed95941c1e6290e689c04bbaceeaa"
 
 
+def _sha256_digest(value: str, *, field: str) -> str:
+    normalized = value.split(":", 1)[1] if value.startswith("sha256:") else value
+    if len(normalized) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in normalized):
+        raise RuntimeError(f"Factory {field} is not a SHA-256 identity: {value}")
+    return normalized.lower()
+
+
 @dataclass(frozen=True, slots=True)
 class FactoryBuildResult:
     artifact_hash: ContentHash
@@ -194,7 +201,7 @@ class SubprocessFactoryRuntime:
                 artifact_path=str(durable_artifact_path),
                 evidence_path=str(durable_evidence_path),
                 artifact_bytes=artifact_path.read_bytes(),
-                logical_payload_identity=ContentHash(logical_payload_identity),
-                manifest_identity=ContentHash(manifest_identity),
+                logical_payload_identity=ContentHash(_sha256_digest(logical_payload_identity, field="logical payload identity")),
+                manifest_identity=ContentHash(_sha256_digest(manifest_identity, field="manifest identity")),
                 factory_candidate_revision_id=candidate_revision_id,
             )
