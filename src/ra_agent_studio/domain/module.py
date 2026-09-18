@@ -84,10 +84,11 @@ class ModuleRevision:
             if authority_class is not ModuleAuthorityClass.FACTORY_AGENT_SPECIFIC:
                 raise ValueError("agent-specific module must retain FACTORY_AGENT_SPECIFIC authority")
         else:
-            if not shared_change_authorization_ref:
-                raise PermissionError("SHARED_CHANGE_REQUIRED_STOP: non-agent-specific module change lacks authorization")
-            if editability is ModuleEditability.AGENT_EDITABLE:
-                raise PermissionError("shared/frozen modules cannot be agent-editable")
+            # Studio is not the shared-change authority. A caller-supplied reference can never
+            # authorize mutation of shared/frozen semantics; route to Frozen shared review.
+            raise PermissionError(
+                "SHARED_CHANGE_REQUIRED_STOP: shared/frozen module mutation must be handled by Frozen shared-change governance"
+            )
         if not agent_requirement_ref or not agent_authority_boundary_ref:
             raise ValueError("exact AgentRequirement and AgentAuthorityBoundary refs are required")
 
