@@ -702,9 +702,14 @@ class StudioService:
             frozen_at=datetime.now(UTC),
         )
         with self.store.transaction():
+            promotion_holder=production_run_id
+            promotion_token=self.store.acquire_fencing_token(candidate.lineage_id.value,promotion_holder)
             self.store.add("freeze", frozen_id.value, self._freeze_payload(record))
             self.store.add_immutable("freeze_closure", frozen_id.value, {
                 "production_run_id": production_run_id,
+                "canonical_promotion_lock_holder": promotion_holder,
+                "canonical_promotion_fencing_token": promotion_token,
+                "locked_predecessor_baseline_id": expected_predecessor,
                 "candidate_id": candidate_id,
                 "candidate_hash": candidate.candidate_hash.value,
                 "artifact_blob_hash": candidate.artifact_blob_hash.value,
@@ -762,7 +767,14 @@ class StudioService:
         candidate = self._candidate_from(self.store.get("candidate", freeze.frozen_artifact.source_candidate_id.value))
         grant = self.authority.require_grant(actor_principal_id, AuthorityScope.PROMOTE_BASELINE, workspace_id=candidate.workspace_id)
         with self.store.transaction():
-            token = self.store.acquire_fencing_token(lineage_id, actor_principal_id)
+            freeze_closure=self.store.get_immutable("freeze_closure",frozen_artifact_id)
+            promotion_holder=str(freeze_closure["canonical_promotion_lock_holder"])
+            token=int(freeze_closure["canonical_promotion_fencing_token"])
+            if promotion_holder != f"production-run:{freeze.frozen_artifact.source_candidate_id.value}":
+                raise PermissionError("freeze/promotion lock holder binding mismatch")
+            lock=self.store.promotion_lock(lineage_id)
+            if lock is None or lock["holder"] != promotion_holder or int(lock["fencing_token"]) != token:
+                raise PermissionError("continuous B09 canonical promotion lock is not held")
             pointer = self.store.get_pointer("current_baseline", lineage_id)
             actual_baseline_id = pointer["value"] if pointer else None
             current = self._baseline_from(self.store.get("baseline", actual_baseline_id)) if actual_baseline_id else None
@@ -807,6 +819,7 @@ class StudioService:
                 "frozen_artifact_id": frozen_artifact_id,
                 "predecessor_baseline_id": expected_predecessor_baseline_id,
                 "fencing_token": token,
+                "canonical_promotion_lock_holder": promotion_holder,
                 "pointer_version": version,
                 "recovery_epoch": self.store.recovery_epoch(),
             })
@@ -815,6 +828,7 @@ class StudioService:
             if run.current_state is not ProductionState.PR_16_IMPLEMENTATION_FROZEN:
                 raise PermissionError(f"canonical closure requires PR-16, got {run.current_state.value}")
             run=self._transition_production(run,ProductionEvent.CANONICAL_CLOSURE_COMPLETE,actor_principal_id)
+            self.store.release_promotion_lock(lineage_id,holder=promotion_holder,fencing_token=token)
             self._audit(actor_principal_id, "baseline_promoted", "baseline", baseline_id, {"lineage_id": lineage_id, "frozen_artifact_id": frozen_artifact_id, "predecessor": expected_predecessor_baseline_id, "grant_id": grant.grant_id, "fencing_token": token, "pointer_version": version, "production_state":run.current_state.value})
         return record
 
