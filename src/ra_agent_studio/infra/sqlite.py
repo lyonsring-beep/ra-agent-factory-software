@@ -287,7 +287,7 @@ class SQLiteStateStore:
         )
 
     def append_audit(self, *, event_id: str, actor_principal_id: str, action: str,
-                     subject_kind: str, subject_id: str, metadata: dict, occurred_at: datetime) -> None:
+                     subject_kind: str, subject_id: str, metadata: dict, occurred_at: datetime) -> dict:
         prior=self._conn.execute("SELECT event_hash FROM audit_events ORDER BY rowid DESC LIMIT 1").fetchone()
         prior_hash=(prior["event_hash"] if prior else "") or ""
         encoded_metadata=self._encode(metadata)
@@ -302,6 +302,7 @@ class SQLiteStateStore:
                VALUES(?,?,?,?,?,?,?,?,?)""",
             (event_id,occurred_at.isoformat(),actor_principal_id,action,subject_kind,subject_id,encoded_metadata,prior_hash,event_hash),
         )
+        return {"event_id":event_id,"event_hash":event_hash,"prior_event_hash":prior_hash}
 
     def list_audit(self) -> tuple[dict,...]:
         rows=self._conn.execute("SELECT * FROM audit_events ORDER BY rowid").fetchall()
