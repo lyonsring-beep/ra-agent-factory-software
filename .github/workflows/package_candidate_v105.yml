@@ -1,0 +1,161 @@
+name: Package RA Agent Studio implementation candidate v1.05
+
+on:
+  push:
+    branches: [implementation-repair-v1_05]
+    paths:
+      - '.github/workflows/package_candidate_v105.yml'
+      - 'web/**'
+      - 'compose.yaml'
+      - 'tests/**'
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-candidate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Enforce authorized FSA-B01 delta only
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=6cd2e99a726893516e31fb8c9c7c4534aa2a46d1
+          git cat-file -e "$BASE^{commit}"
+          git diff --name-only "$BASE"...HEAD | tee /tmp/v105-delta.txt
+          while IFS= read -r path; do
+            case "$path" in
+              web/*|compose.yaml|tests/*|docs/*|.github/workflows/package_candidate_v105.yml) ;;
+              *)
+                echo "UNAUTHORIZED_V105_DELTA:$path" >&2
+                exit 1
+                ;;
+            esac
+          done < /tmp/v105-delta.txt
+          test -z "$(git diff --name-only "$BASE"...HEAD -- src scripts Dockerfile pyproject.toml)"
+          echo "FSA_B01_SCOPE_FIREWALL_PASS"
+
+      - name: Install package and test dependencies
+        run: python -m pip install -e '.[test]'
+
+      - name: Run cumulative regression
+        run: |
+          mkdir -p evidence
+          python -m pytest -q --junitxml=evidence/pytest-junit.xml | tee evidence/pytest-output.txt
+
+      - name: Verify exact frontend delivery contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee evidence/frontend-delivery-verification.txt
+          from pathlib import Path
+          import hashlib
+
+          root=Path('.')
+          app=(root/'web/app.js').read_text(encoding='utf-8')
+          index=(root/'web/index.html').read_text(encoding='utf-8')
+          nginx=(root/'web/nginx.conf').read_text(encoding='utf-8')
+          compose=(root/'compose.yaml').read_text(encoding='utf-8')
+
+          assert "return call('/commands','POST'" in app
+          assert app.count(",'POST'") == 1
+          for legacy in (
+              "call('/modules','POST'",
+              "call('/effects/compare','POST'",
+              "call('/compositions','POST'",
+              "call('/reviews','POST'",
+              "call('/freezes','POST'",
+              "call('/baselines','POST'",
+              "call('/deployments','POST'",
+          ):
+              assert legacy not in app
+          assert "window.RA_STUDIO_API || '/api'" in app
+          assert 'location /api/' in nginx
+          assert 'proxy_pass http://api:8000/' in nginx
+          assert './web/nginx.conf:/etc/nginx/conf.d/default.conf:ro' in compose
+
+          for path in ('web/app.js','web/index.html','web/nginx.conf','compose.yaml'):
+              data=(root/path).read_bytes()
+              print(path,hashlib.sha256(data).hexdigest(),len(data))
+          print('FSA_B01_FRONTEND_DELIVERY_PASS')
+          PY
+
+      - name: Verify API remains single-mutation control plane
+        run: |
+          python - <<'PY' | tee evidence/api-control-plane.txt
+          from ra_agent_studio.api import app
+          post_routes={route.path for route in app.routes if "POST" in getattr(route,"methods",set())}
+          assert post_routes == {"/commands"}
+          print("B12_SINGLE_MUTATION_CONTROL_PLANE_PASS")
+          PY
+
+      - name: Build production container
+        run: |
+          docker build -t ra-agent-studio:candidate-v1_05 . | tee evidence/docker-build.txt
+          docker image inspect ra-agent-studio:candidate-v1_05 --format '{{.Id}}' | tee evidence/docker-image-id.txt
+
+      - name: Record exact candidate identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "candidate=RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05"
+            echo "repository=lyonsring-beep/ra-agent-factory-software"
+            echo "commit=${GITHUB_SHA}"
+            echo "tree=$(git rev-parse HEAD^{tree})"
+            echo "branch=${GITHUB_REF_NAME}"
+            echo "workflow_run_id=${GITHUB_RUN_ID}"
+            echo "workflow_run_number=${GITHUB_RUN_NUMBER}"
+            echo "python=$(python --version 2>&1)"
+            echo "baseline_frozen_studio_source=6cd2e99a726893516e31fb8c9c7c4534aa2a46d1"
+            echo "baseline_frozen_candidate_sha256=046d1a159aae7ace9c1a552f20f37d14b8c19f917d6ab5b027299e1d5acb3929"
+            echo "baseline_frozen_artifact_id=10541843870"
+            echo "failed_fsa_review=RA_AGENT_STUDIO_v1_04_FULL_SYSTEM_ACCEPTANCE_REVIEW_v1_01_FAIL"
+            echo "repair_scope=FSA-B01_FRONTEND_DELIVERY_ONLY"
+            echo "architecture_reopen=NO"
+            echo "factory_reopen=NO"
+            echo "handoff_reopen=NO"
+            echo "backend_semantics_reopen=NO"
+            echo "software_freeze=NOT_AUTHORIZED_PENDING_TARGETED_IMPLEMENTATION_REREVIEW"
+          } > evidence/IMPLEMENTATION_IDENTITY.txt
+          git diff --name-status 6cd2e99a726893516e31fb8c9c7c4534aa2a46d1...HEAD > evidence/V104_TO_V105_DELTA.txt
+          git ls-files | LC_ALL=C sort > evidence/source-files.txt
+          git ls-files -s | LC_ALL=C sort > evidence/source-index.txt
+          sha256sum evidence/source-files.txt evidence/source-index.txt > evidence/source-manifest.sha256
+
+      - name: Build exact v1.05 review candidate archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05
+          mkdir -p "$ROOT"
+          git archive --format=tar HEAD | tar -x -C "$ROOT"
+          mkdir -p "$ROOT/evidence/final_internal_acceptance"
+          cp -a evidence/. "$ROOT/evidence/final_internal_acceptance/"
+          zip -X -r RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip "$ROOT" >/dev/null
+          unzip -t RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip | tee evidence/archive-integrity.txt
+          sha256sum RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.sha256
+          stat -c '%s' RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.size
+
+      - name: Upload exact v1.05 implementation candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05
+          path: |
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.zip
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.sha256
+            RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_05.size
+            evidence/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 90
