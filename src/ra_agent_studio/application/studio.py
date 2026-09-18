@@ -101,6 +101,11 @@ class StudioService:
             "composition_hash": item.composition_hash.value,
             "agent_requirement_ref": item.agent_requirement_ref,
             "agent_authority_boundary_ref": item.agent_authority_boundary_ref,
+            "capability_bindings": [
+                {"capability": capability, "revision_id": revision_id.value}
+                for capability, revision_id in item.capability_bindings
+            ],
+            "capability_binding_identity": item.capability_binding_identity.value if item.capability_binding_identity else None,
             "bindings": [
                 {
                     "module_id": b.module_id.value,
@@ -149,6 +154,11 @@ class StudioService:
             data["composition_id"], bindings, ContentHash(data["composition_hash"]),
             data.get("agent_requirement_ref", bindings[0].agent_requirement_ref if bindings else ""),
             data.get("agent_authority_boundary_ref", bindings[0].agent_authority_boundary_ref if bindings else ""),
+            tuple(
+                (entry["capability"], RevisionId(entry["revision_id"]))
+                for entry in data.get("capability_bindings", [])
+            ),
+            ContentHash(data["capability_binding_identity"]) if data.get("capability_binding_identity") else None,
         )
 
     @staticmethod
