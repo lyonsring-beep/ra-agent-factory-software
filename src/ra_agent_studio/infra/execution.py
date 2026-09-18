@@ -161,19 +161,66 @@ class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
     ]
 
 
+class _SID_AND_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+
+class _SECURITY_CAPABILITIES(ctypes.Structure):
+    _fields_ = [
+        ("AppContainerSid", ctypes.c_void_p),
+        ("Capabilities", ctypes.POINTER(_SID_AND_ATTRIBUTES)),
+        ("CapabilityCount", wintypes.DWORD),
+        ("Reserved", wintypes.DWORD),
+    ]
+
+
+class _STARTUPINFOW(ctypes.Structure):
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("lpReserved", wintypes.LPWSTR),
+        ("lpDesktop", wintypes.LPWSTR),
+        ("lpTitle", wintypes.LPWSTR),
+        ("dwX", wintypes.DWORD),
+        ("dwY", wintypes.DWORD),
+        ("dwXSize", wintypes.DWORD),
+        ("dwYSize", wintypes.DWORD),
+        ("dwXCountChars", wintypes.DWORD),
+        ("dwYCountChars", wintypes.DWORD),
+        ("dwFillAttribute", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("wShowWindow", wintypes.WORD),
+        ("cbReserved2", wintypes.WORD),
+        ("lpReserved2", ctypes.POINTER(ctypes.c_ubyte)),
+        ("hStdInput", wintypes.HANDLE),
+        ("hStdOutput", wintypes.HANDLE),
+        ("hStdError", wintypes.HANDLE),
+    ]
+
+
+class _STARTUPINFOEXW(ctypes.Structure):
+    _fields_ = [("StartupInfo", _STARTUPINFOW), ("lpAttributeList", ctypes.c_void_p)]
+
+
+class _PROCESS_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("hProcess", wintypes.HANDLE),
+        ("hThread", wintypes.HANDLE),
+        ("dwProcessId", wintypes.DWORD),
+        ("dwThreadId", wintypes.DWORD),
+    ]
+
+
 class WindowsNativePythonExecutor:
-    """Windows-native controlled execution boundary.
+    """Windows-native controlled execution boundary using AppContainer + Job Objects.
 
-    Security model:
-    - a dedicated interpreter path configured by the trusted installer;
-    - Windows Firewall outbound block is required and verified before every execution;
-    - a Windows Job Object limits the sandbox to one active process and 128 MiB;
-    - no parent environment or secrets are inherited;
-    - the module source is written into a disposable directory and marked read-only;
-    - isolated Python mode (-I) and no site import (-S) reduce ambient code loading;
-    - timeout terminates the entire Job Object.
+    The module process is created inside a no-capability AppContainer in CREATE_SUSPENDED
+    state. The Job Object is fully configured and attached before the primary thread is
+    resumed. The AppContainer removes ambient same-user filesystem/registry authority;
+    only the dedicated Python runtime (RX) and the disposable sandbox directory (M) are
+    explicitly ACL-brokered. With no network capability, outbound networking is denied.
 
-    This is a separate, explicit provider. It never silently falls back from OCI.
+    Any profile, ACL, process-creation, attribute-list, Job assignment, or resume failure
+    terminates/cleans up and fails closed. There is no unsafe host-subprocess fallback.
     """
 
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
@@ -181,10 +228,23 @@ class WindowsNativePythonExecutor:
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
     JobObjectExtendedLimitInformation = 9
 
+    CREATE_SUSPENDED = 0x00000004
+    CREATE_NO_WINDOW = 0x08000000
+    CREATE_UNICODE_ENVIRONMENT = 0x00000400
+    EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x00020009
+    ERROR_ALREADY_EXISTS = 183
+    WAIT_OBJECT_0 = 0
+    WAIT_TIMEOUT = 258
+    INFINITE = 0xFFFFFFFF
+
     policy = {
-        "network": "windows-firewall-outbound-block-required",
-        "filesystem": "disposable-workdir-plus-read-only-module-source",
+        "network": "appcontainer-no-network-capability",
+        "host_resources": "appcontainer-default-deny",
+        "filesystem": "runtime-rx-plus-disposable-sandbox-only",
+        "registry": "appcontainer-isolated-default-deny",
         "process_tree": "windows-job-object-active-process-limit-1",
+        "startup_order": "create-suspended-appcontainer-attach-job-resume",
         "memory": "128m-process-limit",
         "python": "isolated-mode-no-site",
         "environment": "allowlist-only-no-parent-secrets",
@@ -197,52 +257,105 @@ class WindowsNativePythonExecutor:
         *,
         timeout_seconds: float = 5.0,
         python_executable: str | None = None,
-        firewall_rule_name: str | None = None,
+        appcontainer_profile_name: str | None = None,
     ) -> None:
         if os.name != "nt":
             raise RuntimeError("Windows native controlled execution is only available on Windows")
         self.timeout_seconds=timeout_seconds
-        self.python_executable=str(Path(
-            python_executable or os.environ.get("RA_STUDIO_WINDOWS_SANDBOX_PYTHON","")
-        ).resolve())
-        if not self.python_executable or not Path(self.python_executable).is_file():
+        configured=python_executable or os.environ.get("RA_STUDIO_WINDOWS_SANDBOX_PYTHON","")
+        if not configured:
             raise RuntimeError("RA_STUDIO_WINDOWS_SANDBOX_PYTHON must name the dedicated sandbox interpreter")
-        self.firewall_rule_name=(
-            firewall_rule_name
-            or os.environ.get("RA_STUDIO_WINDOWS_SANDBOX_FIREWALL_RULE","RA Agent Studio v1.06 Sandbox No Network")
+        self.python_executable=str(Path(configured).resolve())
+        if not Path(self.python_executable).is_file():
+            raise RuntimeError("RA_STUDIO_WINDOWS_SANDBOX_PYTHON must name the dedicated sandbox interpreter")
+        self.python_root=str(Path(self.python_executable).parent.resolve())
+        self.appcontainer_profile_name=(
+            appcontainer_profile_name
+            or os.environ.get("RA_STUDIO_WINDOWS_SANDBOX_PROFILE","RAAgentStudio.Sandbox.v106")
         )
-        self._verify_firewall_guard()
+        self._appcontainer_sid,self._appcontainer_sid_string=self._ensure_appcontainer_profile()
+        self._verify_runtime_acl()
         canonical=json.dumps(self.policy,sort_keys=True,separators=(",",":")).encode()
         self.execution_policy_identity=sha256(canonical).hexdigest()
         self.environment_identity=sha256(
-            f"windows-native|{self.python_executable}|{sys.version_info.major}.{sys.version_info.minor}".encode()
+            f"windows-appcontainer|{self.python_executable}|{self._appcontainer_sid_string}|"
+            f"{sys.version_info.major}.{sys.version_info.minor}".encode()
         ).hexdigest()
-        self.identity=f"controlled-windows-native-python-v1:{self.environment_identity[:16]}:{self.execution_policy_identity[:16]}"
+        self.identity=f"controlled-windows-appcontainer-python-v2:{self.environment_identity[:16]}:{self.execution_policy_identity[:16]}"
 
-    def _verify_firewall_guard(self) -> None:
-        escaped_rule=self.firewall_rule_name.replace("'","''")
-        escaped_program=self.python_executable.replace("'","''")
-        command=(
-            "$ErrorActionPreference='Stop';"
-            "$policy=New-Object -ComObject HNetCfg.FwPolicy2;"
-            f"$rule=$policy.Rules.Item('{escaped_rule}');"
-            "if(-not $rule){exit 11};"
-            "if(-not $rule.Enabled -or $rule.Direction -ne 2 -or $rule.Action -ne 0){exit 12};"
-            f"if([IO.Path]::GetFullPath($rule.ApplicationName) -ne [IO.Path]::GetFullPath('{escaped_program}')){{exit 13}}"
+    @staticmethod
+    def _hr_code(value: int) -> int:
+        return ctypes.c_uint32(value).value
+
+    def _ensure_appcontainer_profile(self) -> tuple[ctypes.c_void_p,str]:
+        userenv=ctypes.WinDLL("userenv",use_last_error=True)
+        advapi32=ctypes.WinDLL("advapi32",use_last_error=True)
+        kernel32=ctypes.WinDLL("kernel32",use_last_error=True)
+
+        userenv.CreateAppContainerProfile.argtypes=[
+            wintypes.LPCWSTR,wintypes.LPCWSTR,wintypes.LPCWSTR,
+            ctypes.POINTER(_SID_AND_ATTRIBUTES),wintypes.DWORD,ctypes.POINTER(ctypes.c_void_p),
+        ]
+        userenv.CreateAppContainerProfile.restype=ctypes.c_long
+        userenv.DeriveAppContainerSidFromAppContainerName.argtypes=[
+            wintypes.LPCWSTR,ctypes.POINTER(ctypes.c_void_p)
+        ]
+        userenv.DeriveAppContainerSidFromAppContainerName.restype=ctypes.c_long
+        advapi32.ConvertSidToStringSidW.argtypes=[ctypes.c_void_p,ctypes.POINTER(wintypes.LPWSTR)]
+        advapi32.ConvertSidToStringSidW.restype=wintypes.BOOL
+        kernel32.LocalFree.argtypes=[wintypes.HLOCAL]
+        kernel32.LocalFree.restype=wintypes.HLOCAL
+
+        sid=ctypes.c_void_p()
+        hr=userenv.CreateAppContainerProfile(
+            self.appcontainer_profile_name,
+            "RA Agent Studio Sandbox",
+            "RA Agent Studio v1.06 controlled execution sandbox",
+            None,0,ctypes.byref(sid),
         )
+        code=self._hr_code(hr)
+        if code == (0x80070000 | self.ERROR_ALREADY_EXISTS):
+            sid=ctypes.c_void_p()
+            hr=userenv.DeriveAppContainerSidFromAppContainerName(
+                self.appcontainer_profile_name,ctypes.byref(sid)
+            )
+            if self._hr_code(hr) != 0:
+                raise RuntimeError(f"failed to derive AppContainer SID: HRESULT 0x{self._hr_code(hr):08x}")
+        elif code != 0:
+            raise RuntimeError(f"failed to create AppContainer profile: HRESULT 0x{code:08x}")
+
+        text=wintypes.LPWSTR()
+        if not advapi32.ConvertSidToStringSidW(sid,ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
         try:
-            checked=subprocess.run(
-                ["powershell.exe","-NoProfile","-NonInteractive","-Command",command],
-                capture_output=True,text=True,check=False,timeout=20,
-                env=os.environ.copy(),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("Windows native firewall guard verification timed out") from exc
-        if checked.returncode != 0:
+            sid_string=text.value
+        finally:
+            kernel32.LocalFree(text)
+        if not sid_string:
+            raise RuntimeError("AppContainer SID string is empty")
+        return sid,sid_string
+
+    def _verify_runtime_acl(self) -> None:
+        """Verify the dedicated runtime directory explicitly brokers AppContainer RX access."""
+        checked=subprocess.run(
+            ["icacls",self.python_root],
+            capture_output=True,text=True,check=False,timeout=20,
+            env=os.environ.copy(),
+        )
+        if checked.returncode != 0 or self._appcontainer_sid_string.lower() not in checked.stdout.lower():
             raise RuntimeError(
-                "Windows native controlled execution requires an enabled outbound-block firewall rule "
-                "bound to the dedicated sandbox interpreter"
+                "dedicated sandbox Python runtime is not ACL-brokered to the AppContainer SID"
             )
+
+    def _grant_sandbox_acl(self, root: Path) -> None:
+        grant=f"*{self._appcontainer_sid_string}:(OI)(CI)(M)"
+        result=subprocess.run(
+            ["icacls",str(root),"/inheritance:r","/grant:r",grant],
+            capture_output=True,text=True,check=False,timeout=20,
+            env=os.environ.copy(),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"failed to ACL-broker sandbox directory: {result.stderr.strip() or result.stdout.strip()}")
 
     @staticmethod
     def _create_job(process_handle: int):
@@ -253,6 +366,10 @@ class WindowsNativePythonExecutor:
         kernel32.SetInformationJobObject.restype=wintypes.BOOL
         kernel32.AssignProcessToJobObject.argtypes=[wintypes.HANDLE,wintypes.HANDLE]
         kernel32.AssignProcessToJobObject.restype=wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes=[wintypes.HANDLE,wintypes.UINT]
+        kernel32.TerminateJobObject.restype=wintypes.BOOL
+        kernel32.CloseHandle.argtypes=[wintypes.HANDLE]
+        kernel32.CloseHandle.restype=wintypes.BOOL
 
         job=kernel32.CreateJobObjectW(None,None)
         if not job:
@@ -268,73 +385,196 @@ class WindowsNativePythonExecutor:
         info.ProcessMemoryLimit=128*1024*1024
 
         if not kernel32.SetInformationJobObject(
-            job,
-            WindowsNativePythonExecutor.JobObjectExtendedLimitInformation,
-            ctypes.byref(info),
-            ctypes.sizeof(info),
+            job,WindowsNativePythonExecutor.JobObjectExtendedLimitInformation,
+            ctypes.byref(info),ctypes.sizeof(info),
         ):
             err=ctypes.get_last_error()
             kernel32.CloseHandle(job)
             raise ctypes.WinError(err)
-
         if not kernel32.AssignProcessToJobObject(job,wintypes.HANDLE(process_handle)):
             err=ctypes.get_last_error()
             kernel32.CloseHandle(job)
             raise ctypes.WinError(err)
         return job,kernel32
 
+    def _create_suspended_appcontainer_process(
+        self, *, command: list[str], cwd: str, env: dict[str,str],
+    ) -> tuple[_PROCESS_INFORMATION,ctypes.Array]:
+        kernel32=ctypes.WinDLL("kernel32",use_last_error=True)
+        kernel32.InitializeProcThreadAttributeList.argtypes=[
+            ctypes.c_void_p,wintypes.DWORD,wintypes.DWORD,ctypes.POINTER(ctypes.c_size_t)
+        ]
+        kernel32.InitializeProcThreadAttributeList.restype=wintypes.BOOL
+        kernel32.UpdateProcThreadAttribute.argtypes=[
+            ctypes.c_void_p,wintypes.DWORD,ctypes.c_size_t,ctypes.c_void_p,
+            ctypes.c_size_t,ctypes.c_void_p,ctypes.c_void_p,
+        ]
+        kernel32.UpdateProcThreadAttribute.restype=wintypes.BOOL
+        kernel32.DeleteProcThreadAttributeList.argtypes=[ctypes.c_void_p]
+        kernel32.DeleteProcThreadAttributeList.restype=None
+        kernel32.CreateProcessW.argtypes=[
+            wintypes.LPCWSTR,wintypes.LPWSTR,ctypes.c_void_p,ctypes.c_void_p,wintypes.BOOL,
+            wintypes.DWORD,ctypes.c_void_p,wintypes.LPCWSTR,
+            ctypes.POINTER(_STARTUPINFOW),ctypes.POINTER(_PROCESS_INFORMATION),
+        ]
+        kernel32.CreateProcessW.restype=wintypes.BOOL
+
+        size=ctypes.c_size_t(0)
+        kernel32.InitializeProcThreadAttributeList(None,1,0,ctypes.byref(size))
+        buffer=ctypes.create_string_buffer(size.value)
+        attr=ctypes.cast(buffer,ctypes.c_void_p)
+        if not kernel32.InitializeProcThreadAttributeList(attr,1,0,ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        capabilities=_SECURITY_CAPABILITIES(
+            AppContainerSid=self._appcontainer_sid,
+            Capabilities=None,
+            CapabilityCount=0,
+            Reserved=0,
+        )
+        if not kernel32.UpdateProcThreadAttribute(
+            attr,0,self.PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+            ctypes.byref(capabilities),ctypes.sizeof(capabilities),None,None,
+        ):
+            kernel32.DeleteProcThreadAttributeList(attr)
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        startup=_STARTUPINFOEXW()
+        startup.StartupInfo.cb=ctypes.sizeof(_STARTUPINFOEXW)
+        startup.lpAttributeList=attr
+        pi=_PROCESS_INFORMATION()
+        cmdline=ctypes.create_unicode_buffer(subprocess.list2cmdline(command))
+        env_block=ctypes.create_unicode_buffer(
+            "\0".join(f"{k}={v}" for k,v in sorted(env.items(),key=lambda x:x[0].upper()))+"\0\0"
+        )
+        flags=(
+            self.CREATE_SUSPENDED
+            | self.CREATE_NO_WINDOW
+            | self.CREATE_UNICODE_ENVIRONMENT
+            | self.EXTENDED_STARTUPINFO_PRESENT
+        )
+        ok=kernel32.CreateProcessW(
+            self.python_executable,cmdline,None,None,False,flags,
+            ctypes.cast(env_block,ctypes.c_void_p),cwd,
+            ctypes.byref(startup.StartupInfo),ctypes.byref(pi),
+        )
+        kernel32.DeleteProcThreadAttributeList(attr)
+        if not ok:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return pi,buffer
+
     def execute(self, revision: ModuleRevision, input_text: str) -> ExecutionResult:
-        self._verify_firewall_guard()
-        with tempfile.TemporaryDirectory(prefix="ra-studio-windows-controlled-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="ra-studio-windows-appcontainer-") as temp_dir:
             root=Path(temp_dir)
+            self._grant_sandbox_acl(root)
+
             script=root/"module.py"
+            input_path=root/"input.txt"
+            stdout_path=root/"stdout.txt"
+            stderr_path=root/"stderr.txt"
+            runner=root/"runner.py"
             script.write_text(revision.content,encoding="utf-8")
+            input_path.write_text(input_text,encoding="utf-8")
+            stdout_path.write_text("",encoding="utf-8")
+            stderr_path.write_text("",encoding="utf-8")
+            runner.write_text(
+                "import io, pathlib, sys, traceback\n"
+                "root=pathlib.Path(__file__).resolve().parent\n"
+                "stdin_text=(root/'input.txt').read_text(encoding='utf-8')\n"
+                "out=(root/'stdout.txt').open('w',encoding='utf-8')\n"
+                "err=(root/'stderr.txt').open('w',encoding='utf-8')\n"
+                "sys.stdin=io.StringIO(stdin_text); sys.stdout=out; sys.stderr=err\n"
+                "try:\n"
+                "    source=(root/'module.py').read_text(encoding='utf-8')\n"
+                "    exec(compile(source,str(root/'module.py'),'exec'),{'__name__':'__main__','__file__':str(root/'module.py')})\n"
+                "except BaseException:\n"
+                "    traceback.print_exc(file=err); out.flush(); err.flush(); raise\n"
+                "finally:\n"
+                "    out.flush(); err.flush(); out.close(); err.close()\n",
+                encoding="utf-8",
+            )
             script.chmod(0o444)
-            scratch=root/"tmp"
-            scratch.mkdir()
+            input_path.chmod(0o444)
+            runner.chmod(0o444)
+
             env={
                 "SystemRoot":os.environ.get("SystemRoot",r"C:\Windows"),
                 "WINDIR":os.environ.get("WINDIR",r"C:\Windows"),
-                "TEMP":str(scratch),
-                "TMP":str(scratch),
+                "TEMP":str(root),
+                "TMP":str(root),
                 "PYTHONIOENCODING":"utf-8",
                 "PYTHONUTF8":"1",
             }
-            creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0)
             started=time.monotonic()
-            process=subprocess.Popen(
-                [self.python_executable,"-I","-S",str(script)],
-                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                text=True,cwd=str(root),env=env,creationflags=creationflags,
-            )
+            pi=None
             job=None
             kernel32=None
+            resumed=False
             try:
-                job,kernel32=self._create_job(int(process._handle))
+                pi,_attr_buffer=self._create_suspended_appcontainer_process(
+                    command=[self.python_executable,"-I","-S",str(runner)],
+                    cwd=str(root),env=env,
+                )
                 try:
-                    stdout,stderr=process.communicate(input=input_text,timeout=self.timeout_seconds)
-                    reason="completed"
-                except subprocess.TimeoutExpired as exc:
-                    if kernel32 and job:
-                        kernel32.TerminateJobObject(job,1460)
-                    process.kill()
-                    process.wait(timeout=5)
-                    raise TimeoutError(f"controlled execution timeout after {self.timeout_seconds}s") from exc
+                    job,kernel32=self._create_job(int(pi.hProcess))
+                except BaseException:
+                    ctypes.WinDLL("kernel32",use_last_error=True).TerminateProcess(pi.hProcess,126)
+                    raise
+
+                resume=kernel32.ResumeThread
+                resume.argtypes=[wintypes.HANDLE]
+                resume.restype=wintypes.DWORD
+                previous=resume(pi.hThread)
+                if previous == 0xFFFFFFFF:
+                    kernel32.TerminateJobObject(job,127)
+                    raise ctypes.WinError(ctypes.get_last_error())
+                resumed=True
+
+                wait=kernel32.WaitForSingleObject
+                wait.argtypes=[wintypes.HANDLE,wintypes.DWORD]
+                wait.restype=wintypes.DWORD
+                timeout_ms=max(1,int(self.timeout_seconds*1000))
+                wait_result=wait(pi.hProcess,timeout_ms)
+                if wait_result == self.WAIT_TIMEOUT:
+                    kernel32.TerminateJobObject(job,1460)
+                    wait(pi.hProcess,5000)
+                    raise TimeoutError(f"controlled execution timeout after {self.timeout_seconds}s")
+                if wait_result != self.WAIT_OBJECT_0:
+                    kernel32.TerminateJobObject(job,128)
+                    raise RuntimeError(f"WaitForSingleObject failed with code {wait_result}")
+
+                exit_code=wintypes.DWORD()
+                kernel32.GetExitCodeProcess.argtypes=[wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD)]
+                kernel32.GetExitCodeProcess.restype=wintypes.BOOL
+                if not kernel32.GetExitCodeProcess(pi.hProcess,ctypes.byref(exit_code)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                code=int(exit_code.value)
             finally:
+                if pi is not None:
+                    closer=ctypes.WinDLL("kernel32",use_last_error=True)
+                    if not resumed and job:
+                        closer.TerminateJobObject(job,129)
+                    if pi.hThread:
+                        closer.CloseHandle(pi.hThread)
+                    if pi.hProcess:
+                        closer.CloseHandle(pi.hProcess)
                 if kernel32 and job:
                     kernel32.CloseHandle(job)
-            duration_ms=int((time.monotonic()-started)*1000)
 
-        if process.returncode != 0:
+            duration_ms=int((time.monotonic()-started)*1000)
+            stdout=stdout_path.read_text(encoding="utf-8",errors="replace")
+            stderr=stderr_path.read_text(encoding="utf-8",errors="replace")
+
+        if code != 0:
             raise RuntimeError(
-                f"controlled module execution failed with exit code {process.returncode}: {stderr.strip()}"
+                f"controlled module execution failed with exit code {code}: {stderr.strip()}"
             )
         return ExecutionResult(
-            output_text=stdout,stderr_text=stderr,exit_code=process.returncode,
+            output_text=stdout,stderr_text=stderr,exit_code=code,
             duration_ms=duration_ms,executor_identity=self.identity,
             environment_identity=self.environment_identity,
             execution_policy_identity=self.execution_policy_identity,
-            termination_reason=reason,
+            termination_reason="completed",
         )
 
 
