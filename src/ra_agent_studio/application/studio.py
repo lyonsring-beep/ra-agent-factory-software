@@ -664,6 +664,11 @@ class StudioService:
         run=self._production_from(self.store.get("production_run",production_run_id))
         if run.current_state is not ProductionState.PR_15_IMPLEMENTATION_APPROVED:
             raise PermissionError(f"freeze requires PR-15 implementation approved, got {run.current_state.value}")
+        eligibility=self.store.get_immutable("b09_closure_eligibility",candidate.candidate_id.value)
+        if eligibility.get("standing") != "ELIGIBLE" or eligibility.get("review_id") != review_id:
+            raise PermissionError("B09ClosureEligibility is not ELIGIBLE for this exact review/candidate")
+        if eligibility.get("candidate_hash") != candidate.candidate_hash.value:
+            raise PermissionError("B09ClosureEligibility candidate identity mismatch")
         if not candidate.artifact_blob_hash or not candidate.logical_payload_identity or not candidate.manifest_identity:
             raise PermissionError("candidate lacks exact B09 closure identities")
         immutable = self.store.get_immutable("candidate_closure", candidate.candidate_id.value)
