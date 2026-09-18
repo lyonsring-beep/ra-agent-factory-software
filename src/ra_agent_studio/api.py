@@ -88,6 +88,22 @@ class BaselineCreate(BaseModel):
 class DeploymentCreate(BaseModel):
     deployment_id: str
     frozen_artifact_id: str
+    runtime_profile: dict
+    environment: dict
+    provider_binding: dict
+    secret_scope: dict = Field(default_factory=dict)
+    permission_scope: dict = Field(default_factory=dict)
+    policy: dict
+    runtime_boundary: dict
+
+
+class DeploymentAction(BaseModel):
+    deployment_id: str
+
+
+class DeploymentRevoke(BaseModel):
+    deployment_id: str
+    reason: str
 
 
 def invoke(fn, *args, **kwargs):
@@ -202,7 +218,31 @@ def baseline(body: BaselineCreate, authorization: str | None = Header(default=No
 @app.post("/deployments")
 def deployment(body: DeploymentCreate, authorization: str | None = Header(default=None)):
     principal = authenticated_principal(authorization)
-    return invoke(studio.deploy, actor_principal_id=principal.principal_id, **body.model_dump())
+    return invoke(studio.authorize_deployment, actor_principal_id=principal.principal_id, **body.model_dump())
+
+
+@app.post("/deployments/activate")
+def activate_deployment(body: DeploymentAction, authorization: str | None = Header(default=None)):
+    principal = authenticated_principal(authorization)
+    return invoke(studio.activate_runtime, deployment_id=body.deployment_id, actor_principal_id=principal.principal_id)
+
+
+@app.post("/deployments/hold")
+def hold_deployment(body: DeploymentAction, authorization: str | None = Header(default=None)):
+    principal = authenticated_principal(authorization)
+    return invoke(studio.place_safety_hold, deployment_id=body.deployment_id, actor_principal_id=principal.principal_id)
+
+
+@app.post("/deployments/revoke")
+def revoke_deployment(body: DeploymentRevoke, authorization: str | None = Header(default=None)):
+    principal = authenticated_principal(authorization)
+    return invoke(studio.revoke_deployment, deployment_id=body.deployment_id, actor_principal_id=principal.principal_id, reason=body.reason)
+
+
+@app.post("/deployments/stop")
+def stop_deployment(body: DeploymentAction, authorization: str | None = Header(default=None)):
+    principal = authenticated_principal(authorization)
+    return invoke(studio.stop_runtime, deployment_id=body.deployment_id, actor_principal_id=principal.principal_id)
 
 
 @app.get("/snapshot")
