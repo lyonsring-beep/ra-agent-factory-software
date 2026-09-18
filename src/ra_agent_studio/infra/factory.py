@@ -100,6 +100,12 @@ class SubprocessFactoryRuntime:
                     "content_base64": base64.b64encode(module["content"].encode("utf-8")).decode("ascii"),
                     "provided_capabilities": list(binding.provided_capabilities),
                     "required_capabilities": list(binding.required_capabilities),
+                    "module_type": binding.module_type.value,
+                    "authority_class": binding.authority_class.value,
+                    "editability": binding.editability.value,
+                    "agent_requirement_ref": binding.agent_requirement_ref,
+                    "agent_authority_boundary_ref": binding.agent_authority_boundary_ref,
+                    "shared_change_authorization_ref": binding.shared_change_authorization_ref,
                 }
             )
         request = {
@@ -110,6 +116,8 @@ class SubprocessFactoryRuntime:
             "expected_factory_frozen_package_sha256": FACTORY_V111_FROZEN_PACKAGE_SHA256,
             "studio_composition_id": composition.composition_id,
             "studio_composition_hash": composition.composition_hash.value,
+            "agent_requirement_ref": composition.agent_requirement_ref,
+            "agent_authority_boundary_ref": composition.agent_authority_boundary_ref,
             "bindings": request_bindings,
         }
         with tempfile.TemporaryDirectory(prefix="ra-studio-factory-") as temp_dir:
