@@ -203,7 +203,13 @@ class SQLiteStateStore:
         return self.recovery_epoch()
 
     def acquire_fencing_token(self, lineage_id: str, holder: str) -> int:
-        row=self._conn.execute("SELECT fencing_token FROM promotion_locks WHERE lineage_id=?",(lineage_id,)).fetchone()
+        row=self._conn.execute(
+            "SELECT fencing_token,holder FROM promotion_locks WHERE lineage_id=?",(lineage_id,)
+        ).fetchone()
+        if row is not None and row["holder"]:
+            if row["holder"] == holder:
+                return int(row["fencing_token"])
+            raise PermissionError("canonical promotion lock is already held")
         token=(int(row["fencing_token"])+1) if row else 1
         self._conn.execute(
             """INSERT INTO promotion_locks(lineage_id,fencing_token,holder,updated_at) VALUES(?,?,?,?)
@@ -211,6 +217,22 @@ class SQLiteStateStore:
             (lineage_id,token,holder,datetime.now(UTC).isoformat()),
         )
         return token
+
+    def promotion_lock(self, lineage_id: str) -> dict | None:
+        row=self._conn.execute(
+            "SELECT lineage_id,fencing_token,holder,updated_at FROM promotion_locks WHERE lineage_id=?",
+            (lineage_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def release_promotion_lock(self, lineage_id: str, *, holder: str, fencing_token: int) -> None:
+        row=self.promotion_lock(lineage_id)
+        if row is None or row["holder"] != holder or int(row["fencing_token"]) != fencing_token:
+            raise PermissionError("canonical promotion lock release ownership mismatch")
+        self._conn.execute(
+            "UPDATE promotion_locks SET holder='',updated_at=? WHERE lineage_id=?",
+            (datetime.now(UTC).isoformat(),lineage_id),
+        )
 
     def get_pointer(self, kind: str, key: str) -> dict | None:
         row=self._conn.execute(
