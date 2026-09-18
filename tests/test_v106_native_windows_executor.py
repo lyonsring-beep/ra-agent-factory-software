@@ -4,9 +4,10 @@ import os
 from pathlib import Path
 import tempfile
 import time
-import winreg
-
 import pytest
+
+if os.name == "nt":
+    import winreg
 
 from ra_agent_studio.domain.identity import ContentHash, ModuleId, RevisionId
 from ra_agent_studio.domain.module import ModuleRevision, ModuleRevisionState
