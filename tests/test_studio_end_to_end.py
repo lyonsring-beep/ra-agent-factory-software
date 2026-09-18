@@ -2,7 +2,7 @@ from pathlib import Path
 
 from ra_agent_studio.application.studio import StudioService
 from ra_agent_studio.domain.effect import EffectFixture
-from tests.support import ContractTestFactoryRuntime, authority_registry
+from tests.support import ContractTestFactoryRuntime, ContractTestRuntimeLauncher, authority_registry
 
 
 def test_studio_happy_path_through_deployment(tmp_path: Path) -> None:
@@ -10,6 +10,7 @@ def test_studio_happy_path_through_deployment(tmp_path: Path) -> None:
         db_path=str(tmp_path / "studio.db"),
         authority_registry=authority_registry(),
         factory_runtime=ContractTestFactoryRuntime(),
+        runtime_launcher=ContractTestRuntimeLauncher(),
     )
     studio.create_module_revision(
         module_id="researcher",
@@ -61,7 +62,7 @@ def test_studio_happy_path_through_deployment(tmp_path: Path) -> None:
         policy={"authority_boundary":{"network":False,"tools":[]}},
         runtime_boundary={"network":False,"tools":[]},
     )
-    deployment = studio.activate_runtime(deployment_id="deployment-1", actor_principal_id="deployer")
+    deployment = studio.launch_runtime(deployment_id="deployment-1", actor_principal_id="deployer")
 
     assert baseline.frozen_artifact_id == freeze.frozen_artifact.id
     assert deployment.frozen_artifact_id == freeze.frozen_artifact.id.value
@@ -75,6 +76,7 @@ def test_ungranted_principal_cannot_review(tmp_path: Path) -> None:
         db_path=str(tmp_path / "studio.db"),
         authority_registry=registry,
         factory_runtime=ContractTestFactoryRuntime(),
+        runtime_launcher=ContractTestRuntimeLauncher(),
     )
     studio.create_module_revision(
         module_id="m",
