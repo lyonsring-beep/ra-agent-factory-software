@@ -70,7 +70,7 @@ def require_exact_frozen_inputs(request: dict) -> tuple[Path, Path]:
     return candidate_zip, attestation
 
 
-def template_parameters(module_revision_ids: tuple[str, ...]) -> dict[str, object]:
+def template_parameters(module_revision_ids: tuple[str, ...], capability_bindings: dict[str, str]) -> dict[str, object]:
     return {
         "AGENT_PACKAGE": "ra_agent_studio_realized_agent",
         "OUTPUT_TYPE": "dict[str, object]",
@@ -85,7 +85,7 @@ def template_parameters(module_revision_ids: tuple[str, ...]) -> dict[str, objec
         "IMPLEMENTATION_REF": "ra-agent-studio:implementation-repair-v1_02",
         "REQUIRED_MODULES": repr(module_revision_ids),
         "EXTENSION_NAMESPACE": "ra_agent_studio",
-        "AGENT_SPECIFIC_CAPABILITY_BINDINGS": "{}",
+        "AGENT_SPECIFIC_CAPABILITY_BINDINGS": repr(dict(sorted(capability_bindings.items()))),
         "AGENT_SPECIFIC_BOOTSTRAP_GUARDS": "()",
         "INSTRUCTION_REF": "ra-agent-studio:canonical-instructions",
     }
@@ -135,18 +135,28 @@ def main() -> int:
             raise RuntimeError("STUDIO_MODULE_IDENTITY_MISSING")
 
     required_capabilities: dict[str, str] = {}
-    for binding in request["bindings"]:
-        provider = studio_to_factory[binding["studio_revision_id"]]
-        for capability in binding.get("provided_capabilities", []):
-            required_capabilities.setdefault(capability, provider)
-        for capability in binding.get("required_capabilities", []):
-            if capability not in required_capabilities:
-                for candidate_binding in request["bindings"]:
-                    if capability in candidate_binding.get("provided_capabilities", []):
-                        required_capabilities[capability] = studio_to_factory[candidate_binding["studio_revision_id"]]
-                        break
-            if capability not in required_capabilities:
-                raise RuntimeError(f"FACTORY_CAPABILITY_PROVIDER_MISSING:{capability}")
+    request_by_revision={b["studio_revision_id"]: b for b in request["bindings"]}
+    for entry in request.get("capability_bindings", []):
+        capability=str(entry["capability"])
+        studio_revision_id=str(entry["studio_revision_id"])
+        provider_binding=request_by_revision.get(studio_revision_id)
+        if provider_binding is None:
+            raise RuntimeError(f"FACTORY_CAPABILITY_PROVIDER_REVISION_UNKNOWN:{capability}:{studio_revision_id}")
+        if capability not in provider_binding.get("provided_capabilities", []):
+            raise RuntimeError(f"FACTORY_CAPABILITY_PROVIDER_CONTRACT_MISMATCH:{capability}:{studio_revision_id}")
+        required_capabilities[capability]=studio_to_factory[studio_revision_id]
+    all_required={cap for b in request["bindings"] for cap in b.get("required_capabilities", [])}
+    if set(required_capabilities) != all_required:
+        raise RuntimeError(
+            f"FACTORY_EXACT_CAPABILITY_BINDING_SET_MISMATCH:expected={sorted(all_required)}:actual={sorted(required_capabilities)}"
+        )
+    binding_canonical="\n".join(
+        f"{entry['capability']}:{entry['studio_revision_id']}"
+        for entry in sorted(request.get("capability_bindings", []),key=lambda x:(x["capability"],x["studio_revision_id"]))
+    ).encode("utf-8")
+    binding_identity=hashlib.sha256(binding_canonical).hexdigest()
+    if binding_identity != request.get("capability_binding_identity"):
+        raise RuntimeError("FACTORY_CAPABILITY_BINDING_IDENTITY_MISMATCH")
 
     realized = CompositionService(uow).realize(
         module_revision_ids=tuple(factory_revisions),
@@ -172,7 +182,7 @@ def main() -> int:
         agent_requirement_ref=request["agent_requirement_ref"],
         architecture_source_lock_ref=FROZEN_ARCHITECTURE_SOURCE_LOCK,
         production_run_id=production_run_id,
-        template_parameters=template_parameters(tuple(factory_revisions)),
+        template_parameters=template_parameters(tuple(factory_revisions), required_capabilities),
         principal_ref="studio-build-principal",
         workspace_ref="studio-live-integration",
     )
@@ -217,6 +227,9 @@ def main() -> int:
         "factory_implementation_candidate": persisted,
         "factory_produced_artifact_sha256": artifact_sha,
         "module_identity_map": studio_to_factory,
+        "studio_capability_binding_identity": request.get("capability_binding_identity"),
+        "studio_capability_bindings": request.get("capability_bindings", []),
+        "factory_capability_bindings": required_capabilities,
         "module_authority_contract": [
             {
                 "module_id": b["module_id"],
