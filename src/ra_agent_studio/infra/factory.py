@@ -32,6 +32,10 @@ class FactoryBuildResult:
     reproducible: bool
     artifact_path: str
     evidence_path: str
+    artifact_bytes: bytes
+    logical_payload_identity: ContentHash
+    manifest_identity: ContentHash
+    factory_candidate_revision_id: str
 
     def __post_init__(self) -> None:
         if self.runtime_commit != FACTORY_V111_COMMIT:
@@ -151,7 +155,15 @@ class SubprocessFactoryRuntime:
             if not artifact_path.is_file() or not evidence_path.is_file():
                 raise RuntimeError("Factory response references missing artifact/evidence files")
             artifact_hash = ContentHash.from_bytes(artifact_path.read_bytes())
-            evidence_hash = ContentHash.from_bytes(evidence_path.read_bytes())
+            evidence_bytes = evidence_path.read_bytes()
+            evidence_hash = ContentHash.from_bytes(evidence_bytes)
+            evidence_doc = json.loads(evidence_bytes.decode("utf-8"))
+            persisted = evidence_doc.get("factory_implementation_candidate", {})
+            logical_payload_identity = persisted.get("logical_payload_identity")
+            manifest_identity = persisted.get("manifest_identity")
+            candidate_revision_id = persisted.get("candidate_revision_id", "")
+            if not logical_payload_identity or not manifest_identity or not candidate_revision_id:
+                raise RuntimeError("Factory evidence missing exact logical-payload/manifest/candidate identities")
             if response.get("artifact_sha256") != artifact_hash.value:
                 raise RuntimeError("Factory response artifact hash does not match produced bytes")
             reproducible = bool(response.get("reproducible"))
@@ -176,4 +188,8 @@ class SubprocessFactoryRuntime:
                 reproducible=True,
                 artifact_path=str(durable_artifact_path),
                 evidence_path=str(durable_evidence_path),
+                artifact_bytes=artifact_path.read_bytes(),
+                logical_payload_identity=ContentHash(logical_payload_identity),
+                manifest_identity=ContentHash(manifest_identity),
+                factory_candidate_revision_id=candidate_revision_id,
             )
