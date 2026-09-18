@@ -515,14 +515,17 @@ class StudioService:
             factory_evidence_hash=result.factory_evidence_hash,
         )
         contributors = {actor_principal_id}
-        contributor_workspaces = {self.authority.principal(actor_principal_id).workspace_id}
+        contributor_workspace_by_principal = {
+            actor_principal_id: self.authority.principal(actor_principal_id).workspace_id
+        }
         for binding in composition.bindings:
             author_id = self.get_module(binding.revision_id.value).author_principal_id
             contributors.add(author_id)
             try:
-                contributor_workspaces.add(self.authority.principal(author_id).workspace_id)
+                contributor_workspace_by_principal[author_id] = self.authority.principal(author_id).workspace_id
             except PermissionError:
-                contributor_workspaces.add(workspace_id)
+                contributor_workspace_by_principal[author_id] = workspace_id
+        contributor_workspaces = set(contributor_workspace_by_principal.values())
         candidate = CandidateRecord(
             candidate_id=CandidateId(f"candidate-{result.artifact_hash.value[:24]}"),
             candidate_hash=result.artifact_hash,
@@ -565,11 +568,7 @@ class StudioService:
             self.store.add("evidence", evidence.evidence_id, evidence_payload)
             self.store.add("candidate", candidate.candidate_id.value, self._candidate_payload(candidate))
             for contributor_id in sorted(candidate.contributor_principal_ids):
-                contributor_workspace=(
-                    self.authority.principal(contributor_id).workspace_id
-                    if contributor_id in {p.principal_id for p in [self.authority.principal(x) for x in candidate.contributor_principal_ids if x in self.authority._principals]}
-                    else candidate.workspace_id
-                )
+                contributor_workspace=contributor_workspace_by_principal[contributor_id]
                 self.store.add_immutable("contribution_record",f"{candidate.candidate_id.value}:{contributor_id}",{
                     "exact_candidate_id":candidate.candidate_id.value,
                     "exact_candidate_hash":candidate.candidate_hash.value,
