@@ -16,6 +16,7 @@ from ra_agent_studio.domain.module import ModuleAuthorityClass, ModuleEditabilit
 from ra_agent_studio.domain.review import ReviewBlocker, ReviewRecord, ReviewVerdict, create_review_record
 from ra_agent_studio.domain.production import ProductionEvent, ProductionRunRecord, ProductionState, transition as transition_production
 from ra_agent_studio.domain.deployment import DeploymentAuthorityRecord, DeploymentGrantStanding, GrantEvent, RuntimeDeploymentStanding, RuntimeEvent, RuntimeRealizationSnapshot, grant_next, runtime_next
+from ra_agent_studio.domain.failure_routing import CandidateMutationStanding, FailureClass, ProductionStage, route_failure
 from ra_agent_studio.infra.execution import IsolatedPythonProcessExecutor
 from ra_agent_studio.infra.factory import FACTORY_V111_RUNTIME_IDENTITY, FactoryRuntime, SubprocessFactoryRuntime
 from ra_agent_studio.infra.sqlite import SQLiteStateStore
@@ -554,8 +555,12 @@ class StudioService:
         candidate_id: str,
         reviewer_principal_id: str,
         review_method: str,
-        passed: bool,
+        passed: bool | None = None,
+        verdict: str | None = None,
         blockers: tuple[ReviewBlocker, ...] = (),
+        failure_class: str | None = None,
+        mutation_standing: str = CandidateMutationStanding.UNCHANGED.value,
+        authorized_reopen_scope: tuple[str, ...] = (),
     ) -> ReviewRecord:
         candidate = self._candidate_from(self.store.get("candidate", candidate_id))
         production_run_id=f"production-run:{candidate_id}"
@@ -569,13 +574,26 @@ class StudioService:
             review_method=review_method,
         )
         reviewer = self.authority.principal(reviewer_principal_id)
+        if verdict is None:
+            verdict_value=ReviewVerdict.PASS if passed else ReviewVerdict.FAIL
+        else:
+            verdict_value=ReviewVerdict(verdict.lower())
+        route=None
+        if verdict_value in {ReviewVerdict.FAIL, ReviewVerdict.INCONCLUSIVE}:
+            if not failure_class or not authorized_reopen_scope:
+                raise PermissionError("FAIL/INCONCLUSIVE requires canonical FailureClassification and AuthorizedReopenScope")
+            route=route_failure(
+                FailureClass(failure_class),
+                stage=ProductionStage.IMPLEMENTATION,
+                mutation_standing=CandidateMutationStanding(mutation_standing),
+            )
         record = create_review_record(
             review_id=f"review-{uuid4().hex}",
             candidate=candidate,
             reviewer=reviewer,
             authority_grant=grant,
             review_method=review_method,
-            verdict=ReviewVerdict.PASS if passed else ReviewVerdict.FAIL,
+            verdict=verdict_value,
             blockers=blockers,
         )
         with self.store.transaction():
@@ -596,7 +614,45 @@ class StudioService:
             })
             if record.verdict is ReviewVerdict.PASS:
                 run=self._transition_production(run,ProductionEvent.IMPLEMENTATION_REVIEW_PASS,reviewer_principal_id)
-            self._audit(reviewer_principal_id, "review_recorded", "candidate", candidate_id, {"review_id": record.review_id, "verdict": record.verdict.value, "grant_id": grant.grant_id, "production_state":run.current_state.value})
+                self.store.add_immutable("b09_closure_eligibility", candidate.candidate_id.value, {
+                    "standing":"ELIGIBLE",
+                    "production_run_id":production_run_id,
+                    "candidate_id":candidate.candidate_id.value,
+                    "candidate_hash":candidate.candidate_hash.value,
+                    "logical_payload_identity":candidate.logical_payload_identity.value if candidate.logical_payload_identity else "",
+                    "manifest_identity":candidate.manifest_identity.value if candidate.manifest_identity else "",
+                    "review_id":record.review_id,
+                    "review_independence":"INDEPENDENT",
+                    "production_state":run.current_state.value,
+                })
+            else:
+                failure_ref=f"failure-classification:{uuid4().hex}"
+                reopen_ref=f"authorized-reopen-scope:{uuid4().hex}"
+                self.store.add_immutable("failure_classification",failure_ref,{
+                    "production_run_id":production_run_id,
+                    "review_decision_ref":record.review_id,
+                    "exact_target_ref":candidate.candidate_id.value,
+                    "failure_class":route.failure_class.value,
+                    "production_stage":route.stage.value,
+                    "candidate_mutation_standing":route.mutation_standing.value,
+                    "route_basis":route.route_basis,
+                    "routed_state":route.routed_state.value,
+                    "candidate_bytes_may_change":route.candidate_bytes_may_change,
+                })
+                self.store.add_immutable("authorized_reopen_scope",reopen_ref,{
+                    "production_run_id":production_run_id,
+                    "review_decision_ref":record.review_id,
+                    "exact_target_ref":candidate.candidate_id.value,
+                    "scope_items":list(authorized_reopen_scope),
+                    "route_basis":route.route_basis,
+                    "failure_classification_ref":failure_ref,
+                })
+                run=self._transition_production(run,route.authorization_event,reviewer_principal_id)
+            self._audit(reviewer_principal_id, "review_recorded", "candidate", candidate_id, {
+                "review_id": record.review_id, "verdict": record.verdict.value, "grant_id": grant.grant_id,
+                "production_state":run.current_state.value,
+                "failure_route":route.route_basis if route else None,
+            })
         return record
 
     def freeze(self, *, candidate_id: str, review_id: str, actor_principal_id: str) -> FreezeRecord:
