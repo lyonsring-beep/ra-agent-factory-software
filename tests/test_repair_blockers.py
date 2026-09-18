@@ -252,3 +252,47 @@ def test_same_target_review_requires_workspace_independence(tmp_path: Path) -> N
             review_method="external_ai",
             passed=True,
         )
+
+
+def test_controlled_execution_blocks_host_secret_and_network(tmp_path: Path, monkeypatch) -> None:
+    service = studio(tmp_path)
+    secret_name = "RA_STUDIO_HOST_SECRET_FOR_TEST"
+    monkeypatch.setenv(secret_name, "must-not-leak")
+    code = (
+        "import os, socket\n"
+        "print('secret=' + str(os.environ.get('" + secret_name + "')))\n"
+        "s=socket.socket(); s.settimeout(0.5)\n"
+        "try:\n"
+        "    s.connect(('1.1.1.1', 53)); print('network=OPEN')\n"
+        "except Exception:\n"
+        "    print('network=BLOCKED')\n"
+    )
+    service.create_module_revision(
+        module_id="hostile", revision_id="hostile-r1", name="Hostile",
+        content=code, actor_principal_id="builder",
+        provided_capabilities=("answer",), identity_domain="hostile",
+        config_json='{"mode":"hostile"}',
+    )
+    obs = service.run_effect_fixture("hostile-r1", EffectFixture("fx-hostile", "", ("secret=None", "network=BLOCKED")))
+    assert obs.passed is True
+
+
+def test_closed_operation_catalog_requires_recovery_and_idempotency() -> None:
+    from ra_agent_studio.application.control_contracts import CommandEnvelope
+    from ra_agent_studio.application.operation_catalog import APPLICATION_OPERATION_CATALOG, descriptor
+
+    assert "op:governance:implementation-review-pass" in APPLICATION_OPERATION_CATALOG
+    assert "op:factory:exact-freeze" in APPLICATION_OPERATION_CATALOG
+    assert descriptor("op:factory:canonical-promote").intent == "CANONICAL_PROMOTE"
+    with pytest.raises(ValueError, match="IDEMPOTENCY_KEY_REQUIRED"):
+        CommandEnvelope(
+            command_id="c1", operation_descriptor_id="op:factory:exact-freeze",
+            exact_target_ref="candidate:x", principal_ref="freezer", workspace_ref="ws",
+            idempotency_key="", expected_recovery_epoch=1,
+        ).validate()
+    with pytest.raises(ValueError, match="EXPECTED_RECOVERY_EPOCH_REQUIRED"):
+        CommandEnvelope(
+            command_id="c2", operation_descriptor_id="op:factory:exact-freeze",
+            exact_target_ref="candidate:x", principal_ref="freezer", workspace_ref="ws",
+            idempotency_key="idem", expected_recovery_epoch=0,
+        ).validate()
