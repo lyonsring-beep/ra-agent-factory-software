@@ -72,7 +72,8 @@ class SQLiteStateStore:
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS idempotency_records (
-                    command_id TEXT PRIMARY KEY,
+                    idempotency_key TEXT PRIMARY KEY,
+                    command_id TEXT NOT NULL,
                     request_sha256 TEXT NOT NULL,
                     result_kind TEXT NOT NULL,
                     result_key TEXT NOT NULL,
@@ -102,6 +103,34 @@ class SQLiteStateStore:
                 self._conn.execute("ALTER TABLE audit_events ADD COLUMN prior_event_hash TEXT NOT NULL DEFAULT ''")
             if "event_hash" not in cols:
                 self._conn.execute("ALTER TABLE audit_events ADD COLUMN event_hash TEXT NOT NULL DEFAULT ''")
+            idem_cols={row["name"] for row in self._conn.execute("PRAGMA table_info(idempotency_records)").fetchall()}
+            if "idempotency_key" not in idem_cols:
+                # v1.03 keyed this table by command_id. Those historical rows predate the
+                # authoritative IdempotencyKey contract and cannot be safely inferred from
+                # request data, so preserve them under a namespaced legacy key while moving
+                # the live schema to IdempotencyKey-as-primary-key.
+                self._conn.executescript(
+                    """
+                    ALTER TABLE idempotency_records RENAME TO idempotency_records_v103_legacy;
+                    CREATE TABLE idempotency_records (
+                        idempotency_key TEXT PRIMARY KEY,
+                        command_id TEXT NOT NULL,
+                        request_sha256 TEXT NOT NULL,
+                        result_kind TEXT NOT NULL,
+                        result_key TEXT NOT NULL,
+                        recovery_epoch INTEGER NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    INSERT INTO idempotency_records(
+                        idempotency_key,command_id,request_sha256,result_kind,result_key,recovery_epoch,created_at
+                    )
+                    SELECT
+                        'legacy-command-id:' || command_id,
+                        command_id,request_sha256,result_kind,result_key,recovery_epoch,created_at
+                    FROM idempotency_records_v103_legacy;
+                    DROP TABLE idempotency_records_v103_legacy;
+                    """
+                )
 
     @contextmanager
     def transaction(self) -> Iterator["SQLiteStateStore"]:
@@ -284,25 +313,42 @@ class SQLiteStateStore:
         )
         return new_version
 
-    def get_idempotency(self, command_id: str) -> dict | None:
+    def get_idempotency(self, idempotency_key: str) -> dict | None:
         row=self._conn.execute(
-            "SELECT command_id,request_sha256,result_kind,result_key,recovery_epoch FROM idempotency_records WHERE command_id=?",
-            (command_id,),
+            """SELECT idempotency_key,command_id,request_sha256,result_kind,result_key,recovery_epoch
+               FROM idempotency_records WHERE idempotency_key=?""",
+            (idempotency_key,),
         ).fetchone()
         return dict(row) if row is not None else None
 
-    def record_idempotency(self, command_id: str, request_payload: dict, result_kind: str, result_key: str) -> None:
+    def record_idempotency(
+        self,
+        idempotency_key: str,
+        command_id: str,
+        request_payload: dict,
+        result_kind: str,
+        result_key: str,
+    ) -> None:
         digest=sha256(self._encode(request_payload).encode()).hexdigest()
-        row=self._conn.execute("SELECT request_sha256,result_kind,result_key,recovery_epoch FROM idempotency_records WHERE command_id=?",(command_id,)).fetchone()
+        row=self._conn.execute(
+            """SELECT idempotency_key,command_id,request_sha256,result_kind,result_key,recovery_epoch
+               FROM idempotency_records WHERE idempotency_key=?""",
+            (idempotency_key,),
+        ).fetchone()
         if row is not None:
-            if row["request_sha256"] != digest or row["result_kind"] != result_kind or row["result_key"] != result_key:
-                raise PermissionError("duplicate command id with different request/result")
+            if row["request_sha256"] != digest:
+                raise PermissionError("CONFLICTING_REUSE: IdempotencyKey reused for a different logical request")
             if int(row["recovery_epoch"]) != self.recovery_epoch():
                 raise PermissionError("stale recovery epoch idempotency record")
             return
         self._conn.execute(
-            "INSERT INTO idempotency_records(command_id,request_sha256,result_kind,result_key,recovery_epoch,created_at) VALUES(?,?,?,?,?,?)",
-            (command_id,digest,result_kind,result_key,self.recovery_epoch(),datetime.now(UTC).isoformat()),
+            """INSERT INTO idempotency_records(
+                idempotency_key,command_id,request_sha256,result_kind,result_key,recovery_epoch,created_at
+            ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                idempotency_key,command_id,digest,result_kind,result_key,
+                self.recovery_epoch(),datetime.now(UTC).isoformat(),
+            ),
         )
 
     def append_audit(self, *, event_id: str, actor_principal_id: str, action: str,
@@ -370,7 +416,7 @@ class SQLiteStateStore:
         ]
         idempotency=[
             dict(r) for r in self._conn.execute(
-                "SELECT command_id,request_sha256,result_kind,result_key,recovery_epoch FROM idempotency_records ORDER BY command_id"
+                "SELECT idempotency_key,command_id,request_sha256,result_kind,result_key,recovery_epoch FROM idempotency_records ORDER BY idempotency_key"
             ).fetchall()
         ]
         audit=self.list_audit()
