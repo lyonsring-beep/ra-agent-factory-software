@@ -297,6 +297,79 @@ class SQLiteStateStore:
             })
         return tuple(out)
 
+    def _authoritative_consistency_payload(self) -> dict:
+        records=[
+            {"kind":r["kind"],"record_key":r["record_key"],"payload":json.loads(r["payload"])}
+            for r in self._conn.execute(
+                "SELECT kind,record_key,payload FROM records ORDER BY kind,record_key"
+            ).fetchall()
+        ]
+        immutable=[
+            {"kind":r["kind"],"record_key":r["record_key"],"payload_sha256":r["payload_sha256"]}
+            for r in self._conn.execute(
+                "SELECT kind,record_key,payload_sha256 FROM immutable_records WHERE kind NOT IN ('backup_manifest','backup_verification') ORDER BY kind,record_key"
+            ).fetchall()
+        ]
+        blobs=[
+            {"sha256":r["sha256"],"size_bytes":int(r["size_bytes"])}
+            for r in self._conn.execute("SELECT sha256,size_bytes FROM blobs ORDER BY sha256").fetchall()
+        ]
+        pointers=[
+            dict(r) for r in self._conn.execute(
+                "SELECT pointer_kind,pointer_key,value,version,recovery_epoch FROM current_pointers ORDER BY pointer_kind,pointer_key"
+            ).fetchall()
+        ]
+        idempotency=[
+            dict(r) for r in self._conn.execute(
+                "SELECT command_id,request_sha256,result_kind,result_key,recovery_epoch FROM idempotency_records ORDER BY command_id"
+            ).fetchall()
+        ]
+        audit=self.list_audit()
+        return {
+            "records":records,"immutable_records":immutable,"blobs":blobs,
+            "current_pointers":pointers,"idempotency_positions":idempotency,
+            "audit_terminal_hash":audit[-1]["event_hash"] if audit else "",
+            "recovery_epoch":self.recovery_epoch(),
+        }
+
+    def create_backup_manifest(self, backup_id: str) -> dict:
+        payload=self._authoritative_consistency_payload()
+        digest=sha256(self._encode(payload).encode()).hexdigest()
+        manifest={
+            "backup_id":backup_id,
+            "consistency_sha256":digest,
+            "recovery_epoch":self.recovery_epoch(),
+            "required_blob_set":[x["sha256"] for x in payload["blobs"]],
+            "audit_terminal_hash":payload["audit_terminal_hash"],
+            "standing":"RECORDED",
+        }
+        self.add_immutable("backup_manifest",backup_id,manifest)
+        return manifest
+
+    def verify_backup_manifest(self, backup_id: str) -> dict:
+        manifest=self.get_immutable("backup_manifest",backup_id)
+        payload=self._authoritative_consistency_payload()
+        digest=sha256(self._encode(payload).encode()).hexdigest()
+        actual_blobs=[x["sha256"] for x in payload["blobs"]]
+        checks={
+            "consistency_sha256":digest == manifest["consistency_sha256"],
+            "required_blob_set":actual_blobs == manifest["required_blob_set"],
+            "audit_terminal_hash":payload["audit_terminal_hash"] == manifest["audit_terminal_hash"],
+            "recovery_epoch":self.recovery_epoch() == int(manifest["recovery_epoch"]),
+        }
+        if not all(checks.values()):
+            raise RuntimeError(f"backup restore assessment failed: {checks}")
+        assessment={
+            "backup_id":backup_id,"standing":"VERIFIED_RECOVERABLE","checks":checks,
+            "verified_recovery_epoch":self.recovery_epoch(),
+        }
+        self.add_immutable("backup_verification",f"{backup_id}:epoch:{self.recovery_epoch()}",assessment)
+        return assessment
+
+    def advance_after_verified_restore(self, backup_id: str) -> int:
+        self.verify_backup_manifest(backup_id)
+        return self.bump_recovery_epoch()
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
