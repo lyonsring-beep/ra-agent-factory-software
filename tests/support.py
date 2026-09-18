@@ -40,7 +40,8 @@ def authority_registry() -> AuthorityRegistry:
         "deployer": "deployer-token",
     }
     for principal_id, token in principals.items():
-        registry.add_principal(Principal(principal_id, "ws"), bearer_token=token)
+        principal_workspace = "review-ws" if principal_id == "reviewer" else "ws"
+        registry.add_principal(Principal(principal_id, principal_workspace), bearer_token=token)
     registry.add_grant(
         AuthorityGrant(
             "grant-build",
@@ -57,6 +58,9 @@ def authority_registry() -> AuthorityRegistry:
             "ws",
             review_methods=frozenset({"external_ai"}),
             independent_of_principals=frozenset({"builder"}),
+            independent_of_workspaces=frozenset({"ws"}),
+            authority_source="external-review-authority",
+            target_scope="exact_candidate_in_workspace",
         )
     )
     registry.add_grant(
