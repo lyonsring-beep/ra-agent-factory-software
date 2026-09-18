@@ -47,12 +47,41 @@ jobs:
           import ra_agent_studio.api
           print("WINDOWS_NATIVE_API_IMPORT_PASS")
           print(ra_agent_studio.api.studio.sandbox_executor.identity)
-          '@ | python -
+          '@ | python - | Tee-Object -FilePath native-windows-api.txt
 
       - name: Run native Windows sandbox adversarial tests
         shell: pwsh
         run: |
-          python -m pytest -q tests/test_v106_native_windows_executor.py
+          python -m pytest -q tests/test_v106_native_windows_executor.py | Tee-Object -FilePath native-windows-pytest.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Record native Windows test identity
+        shell: pwsh
+        run: |
+          @"
+          standing=NATIVE_WINDOWS_RUNTIME_TEST_PASS
+          commit=$env:GITHUB_SHA
+          workflow_run_id=$env:GITHUB_RUN_ID
+          provider=windows-native
+          firewall_guard=outbound-block-bound-to-dedicated-interpreter
+          process_boundary=windows-job-object
+          active_process_limit=1
+          process_memory_limit_bytes=134217728
+          parent_environment_inheritance=NO
+          docker_required=NO
+          podman_required=NO
+          "@ | Set-Content -Encoding ASCII native-windows-test-identity.txt
+
+      - name: Upload native Windows runtime evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_v1_06_NATIVE_WINDOWS_RUNTIME_EVIDENCE
+          path: |
+            native-windows-api.txt
+            native-windows-pytest.txt
+            native-windows-test-identity.txt
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Remove CI firewall guard
         if: always()
