@@ -243,6 +243,13 @@ class SQLiteStateStore:
         )
         return new_version
 
+    def get_idempotency(self, command_id: str) -> dict | None:
+        row=self._conn.execute(
+            "SELECT command_id,request_sha256,result_kind,result_key,recovery_epoch FROM idempotency_records WHERE command_id=?",
+            (command_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def record_idempotency(self, command_id: str, request_payload: dict, result_kind: str, result_key: str) -> None:
         digest=sha256(self._encode(request_payload).encode()).hexdigest()
         row=self._conn.execute("SELECT request_sha256,result_kind,result_key,recovery_epoch FROM idempotency_records WHERE command_id=?",(command_id,)).fetchone()
