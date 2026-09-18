@@ -739,6 +739,23 @@ class StudioService:
                 fencing_token=token,
             )
             self.store.put("current_baseline", lineage_id, {"baseline_id": baseline_id, "version": version, "fencing_token": token})
+            for dep_payload in self.store.list("deployment"):
+                if dep_payload.get("lineage_id") != lineage_id or dep_payload.get("baseline_id") == baseline_id:
+                    continue
+                dep=self._deployment_from(dep_payload)
+                if dep.grant_standing is DeploymentGrantStanding.ACTIVE:
+                    dep=replace(
+                        dep,
+                        grant_standing=grant_next(dep.grant_standing,GrantEvent.TARGET_SUPERSEDED,"REVALIDATION_REQUIRED"),
+                        runtime_standing=(
+                            runtime_next(dep.runtime_standing,RuntimeEvent.TARGET_SUPERSEDED,"REVALIDATION_REQUIRED")
+                            if dep.runtime_standing is RuntimeDeploymentStanding.ACTIVE else dep.runtime_standing
+                        ),
+                    )
+                    self._save_deployment(dep)
+                    self._audit(actor_principal_id,"deployment_target_superseded","deployment",dep.deployment_id,{
+                        "new_baseline_id":baseline_id,"new_pointer_version":version,
+                    })
             self.store.add_immutable("promotion_closure", baseline_id, {
                 "lineage_id": lineage_id,
                 "frozen_artifact_id": frozen_artifact_id,
@@ -971,6 +988,63 @@ class StudioService:
             self._audit(actor_principal_id,"deployment_safety_hold","deployment",deployment_id,{})
         return rec
 
+    def revalidate_deployment(
+        self, *, deployment_id: str, actor_principal_id: str, continue_active: bool = False,
+    ) -> DeploymentAuthorityRecord:
+        rec=self._deployment_from(self.store.get("deployment",deployment_id))
+        freeze=self._freeze_from(self.store.get("freeze",rec.frozen_artifact_id))
+        candidate=self._candidate_from(self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value))
+        self.authority.require_grant(actor_principal_id,AuthorityScope.DEPLOY,workspace_id=candidate.workspace_id)
+        with self.store.transaction():
+            rec=self._deployment_from(self.store.get("deployment",deployment_id))
+            realization=self.store.get_immutable("runtime_realization",rec.realization_snapshot_id)
+            pointer=self.store.get_pointer("current_baseline",rec.lineage_id)
+            policy=dict(realization.get("policy",{}))
+            target_current=pointer is not None and pointer["value"] == rec.baseline_id
+            allow_superseded=bool(policy.get("allow_superseded_target",False))
+            checks={
+                "recovery_epoch_current":rec.recovery_epoch == self.store.recovery_epoch(),
+                "realization_identity_current":realization.get("identity") == rec.realization_identity,
+                "grant_not_revoked":rec.grant_standing not in {DeploymentGrantStanding.REVOKED,DeploymentGrantStanding.EXPIRED},
+                "target_currentness_allowed":target_current or allow_superseded,
+            }
+            assessment_ref=f"deployment-revalidation:{uuid4().hex}"
+            outcome="REVALIDATED_CONTINUE_ALLOWED" if all(checks.values()) else "REVALIDATION_DENIED"
+            self.store.add_immutable("deployment_revalidation",assessment_ref,{
+                "deployment_id":deployment_id,"checks":checks,"outcome":outcome,
+                "pointer_value":pointer["value"] if pointer else None,
+                "pointer_version":int(pointer["version"]) if pointer else None,
+                "recovery_epoch":self.store.recovery_epoch(),
+            })
+            if outcome == "REVALIDATION_DENIED":
+                if rec.grant_standing in {DeploymentGrantStanding.SUSPENDED,DeploymentGrantStanding.SUPERSEDED_TARGET_REVALIDATION_REQUIRED}:
+                    rec=replace(rec,grant_standing=grant_next(rec.grant_standing,GrantEvent.REVALIDATION_DENIED))
+                if rec.runtime_standing in {RuntimeDeploymentStanding.SAFETY_HELD,RuntimeDeploymentStanding.REVALIDATION_REQUIRED}:
+                    rec=replace(rec,runtime_standing=runtime_next(rec.runtime_standing,RuntimeEvent.REVALIDATION_DENIED))
+                self._save_deployment(rec)
+                self._audit(actor_principal_id,"deployment_revalidation_denied","deployment",deployment_id,{"assessment_ref":assessment_ref})
+                return rec
+            if rec.safety_hold and rec.grant_standing is DeploymentGrantStanding.SUSPENDED:
+                rec=replace(
+                    rec,
+                    grant_standing=grant_next(rec.grant_standing,GrantEvent.SAFETY_HOLD_REMOVED_AND_REVALIDATED,"REVALIDATED_CONTINUE_ALLOWED"),
+                    runtime_standing=runtime_next(rec.runtime_standing,RuntimeEvent.SAFETY_HOLD_REMOVED),
+                    safety_hold=False,
+                )
+            elif rec.grant_standing is DeploymentGrantStanding.SUPERSEDED_TARGET_REVALIDATION_REQUIRED:
+                rec=replace(
+                    rec,
+                    grant_standing=grant_next(rec.grant_standing,GrantEvent.REVALIDATED,"REVALIDATED_CONTINUE_ALLOWED"),
+                )
+            if rec.runtime_standing is RuntimeDeploymentStanding.REVALIDATION_REQUIRED:
+                condition="CONTINUE_ACTIVE" if continue_active else "CONTINUE_INACTIVE"
+                rec=replace(rec,runtime_standing=runtime_next(rec.runtime_standing,RuntimeEvent.REVALIDATED,condition))
+            self._save_deployment(rec)
+            self._audit(actor_principal_id,"deployment_revalidated","deployment",deployment_id,{
+                "assessment_ref":assessment_ref,"continue_active":continue_active,
+            })
+            return rec
+
     def revoke_deployment(self, *, deployment_id: str, actor_principal_id: str, reason: str) -> DeploymentAuthorityRecord:
         rec=self._deployment_from(self.store.get("deployment",deployment_id))
         freeze=self._freeze_from(self.store.get("freeze",rec.frozen_artifact_id))
@@ -988,6 +1062,9 @@ class StudioService:
 
     def stop_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
         rec=self._deployment_from(self.store.get("deployment",deployment_id))
+        freeze=self._freeze_from(self.store.get("freeze",rec.frozen_artifact_id))
+        candidate=self._candidate_from(self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value))
+        self.authority.require_grant(actor_principal_id,AuthorityScope.DEPLOY,workspace_id=candidate.workspace_id)
         with self.store.transaction():
             rec=self._deployment_from(self.store.get("deployment",deployment_id))
             stopping=runtime_next(rec.runtime_standing,RuntimeEvent.STOP_REQUESTED)
