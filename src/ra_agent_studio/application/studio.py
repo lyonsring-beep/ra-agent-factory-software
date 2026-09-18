@@ -337,15 +337,28 @@ class StudioService:
         )
 
     def _audit(self, actor: str, action: str, kind: str, subject_id: str, metadata: dict) -> None:
-        self.store.append_audit(
-            event_id=f"audit-{uuid4().hex}",
+        event_id=f"audit-{uuid4().hex}"
+        occurred_at=datetime.now(UTC)
+        audit=self.store.append_audit(
+            event_id=event_id,
             actor_principal_id=actor,
             action=action,
             subject_kind=kind,
             subject_id=subject_id,
             metadata=metadata,
-            occurred_at=datetime.now(UTC),
+            occurred_at=occurred_at,
         )
+        self.store.add_immutable("authority_commit_set",event_id,{
+            "action":action,
+            "actor_principal_id":actor,
+            "subject_kind":kind,
+            "subject_id":subject_id,
+            "metadata":metadata,
+            "audit_event_hash":audit["event_hash"],
+            "prior_audit_event_hash":audit["prior_event_hash"],
+            "recovery_epoch":self.store.recovery_epoch(),
+            "committed_at":occurred_at.isoformat(),
+        })
 
     def create_module_revision(
         self,
