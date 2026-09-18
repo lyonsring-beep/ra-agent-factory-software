@@ -27,5 +27,6 @@ def test_snapshot_endpoint_exposes_authoritative_projection_and_audit() -> None:
         "freezes",
         "baselines",
         "deployments",
+        "production_runs",
         "audit",
     }
