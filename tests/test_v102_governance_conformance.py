@@ -100,12 +100,12 @@ def test_idempotency_and_recovery_epoch_reject_stale_commands(tmp_path: Path) ->
     store=SQLiteStateStore(str(tmp_path/"state.db"))
     request={"target":"x","action":"freeze"}
     with store.transaction():
-        store.record_idempotency("cmd-1",request,"freeze","f1")
-        store.record_idempotency("cmd-1",request,"freeze","f1")
+        store.record_idempotency("idem-1","cmd-1",request,"freeze","f1")
+        store.record_idempotency("idem-1","cmd-1",request,"freeze","f1")
         assert store.bump_recovery_epoch() == 2
     with pytest.raises(PermissionError,match="stale recovery epoch"):
         with store.transaction():
-            store.record_idempotency("cmd-1",request,"freeze","f1")
+            store.record_idempotency("idem-1","cmd-1",request,"freeze","f1")
 
 
 def test_audit_chain_detects_tamper(tmp_path: Path) -> None:
