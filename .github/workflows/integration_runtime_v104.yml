@@ -1,0 +1,164 @@
+name: RA Agent Studio v1.04 Integration Runtime Acceptance
+
+on:
+  push:
+    branches: [integration-runtime-v1_04]
+    paths:
+      - '.github/workflows/integration_runtime_v104.yml'
+      - 'integration/**'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  integration-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout integration harness
+        uses: actions/checkout@v4
+        with:
+          path: integration-control
+
+      - name: Checkout exact Frozen Studio v1.04 source
+        uses: actions/checkout@v4
+        with:
+          repository: lyonsring-beep/ra-agent-factory-software
+          ref: 6cd2e99a726893516e31fb8c9c7c4534aa2a46d1
+          path: studio-frozen
+
+      - name: Checkout exact Frozen Factory v1.11 source
+        uses: actions/checkout@v4
+        with:
+          repository: lyonsring-beep/ra-agent-factory-irb06
+          ref: bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f
+          path: factory
+
+      - name: Download exact Factory V8 FROZEN artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RA_AGENT_FACTORY_v1_11_STANDALONE_IR_B06_EVIDENCE_V8_FROZEN
+          path: frozen-v8
+          repository: lyonsring-beep/ra-agent-factory-irb06
+          run-id: 34813046629
+          github-token: ${{ github.token }}
+
+      - name: Verify frozen source and Factory identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C studio-frozen rev-parse HEAD)" = "6cd2e99a726893516e31fb8c9c7c4534aa2a46d1"
+          test "$(git -C factory rev-parse HEAD)" = "bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f"
+          CANDIDATE=$(find frozen-v8 -type f -name 'RA_AGENT_FACTORY_IMPLEMENTATION_CANDIDATE_v1_11.zip' -print -quit)
+          test -n "$CANDIDATE"
+          echo '8387b7aa27d39be56a4f1e28ae979f9f233b1f29c196b5339c1b40dd6fdfec7b  '"$CANDIDATE" | sha256sum -c -
+          mkdir -p integration-evidence factory-output
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          Path("integration-evidence/FACTORY_V111_FROZEN_PACKAGE_ATTESTATION.json").write_text(
+              json.dumps({
+                  "artifact_id":10334979844,
+                  "run_id":34813046629,
+                  "artifact_name":"RA_AGENT_FACTORY_v1_11_STANDALONE_IR_B06_EVIDENCE_V8_FROZEN",
+                  "artifact_digest_sha256":"df04ac7cc938be23d7652fa8424dd50f220ed95941c1e6290e689c04bbaceeaa",
+                  "factory_commit":"bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f",
+                  "factory_candidate_sha256":"8387b7aa27d39be56a4f1e28ae979f9f233b1f29c196b5339c1b40dd6fdfec7b"
+              },indent=2,sort_keys=True),
+              encoding="utf-8",
+          )
+          PY
+          echo "RA_FACTORY_V111_REPO_ROOT=$GITHUB_WORKSPACE/factory" >> "$GITHUB_ENV"
+          echo "RA_FACTORY_V111_CANDIDATE_ZIP=$GITHUB_WORKSPACE/$CANDIDATE" >> "$GITHUB_ENV"
+          echo "RA_FACTORY_V111_FROZEN_PACKAGE_ATTESTATION=$GITHUB_WORKSPACE/integration-evidence/FACTORY_V111_FROZEN_PACKAGE_ATTESTATION.json" >> "$GITHUB_ENV"
+          echo "RA_FACTORY_V111_COMMAND=python $GITHUB_WORKSPACE/studio-frozen/scripts/factory_v111_bridge.py" >> "$GITHUB_ENV"
+          echo "RA_STUDIO_DB_PATH=$GITHUB_WORKSPACE/integration-evidence/ra_agent_studio.db" >> "$GITHUB_ENV"
+          echo "RA_STUDIO_FACTORY_EVIDENCE_DIR=$GITHUB_WORKSPACE/factory-output" >> "$GITHUB_ENV"
+          echo "RA_STUDIO_SANDBOX_RUNTIME=docker" >> "$GITHUB_ENV"
+          echo "RA_STUDIO_SANDBOX_IMAGE=python:3.14-slim" >> "$GITHUB_ENV"
+          echo "RA_STUDIO_RUNTIME_LAUNCH_COMMAND=python $GITHUB_WORKSPACE/integration-control/integration/runtime_provider.py" >> "$GITHUB_ENV"
+          echo "RA_STUDIO_RUNTIME_STOP_COMMAND=python $GITHUB_WORKSPACE/integration-control/integration/runtime_provider.py" >> "$GITHUB_ENV"
+
+      - name: Configure bounded integration authorities
+        shell: bash
+        run: |
+          cat >> "$GITHUB_ENV" <<'EOF'
+          RA_STUDIO_AUTHORITY_CONFIG_JSON={"principals":[{"principal_id":"builder","workspace_id":"integration-ws","bearer_token":"builder-token"},{"principal_id":"reviewer","workspace_id":"review-ws","bearer_token":"reviewer-token"},{"principal_id":"freezer","workspace_id":"integration-ws","bearer_token":"freezer-token"},{"principal_id":"promoter","workspace_id":"integration-ws","bearer_token":"promoter-token"},{"principal_id":"deployer","workspace_id":"integration-ws","bearer_token":"deployer-token"}],"grants":[{"grant_id":"int-builder","principal_id":"builder","scopes":["design_authoring","implementation_authoring","build"],"workspace_id":"integration-ws"},{"grant_id":"int-reviewer","principal_id":"reviewer","scopes":["review"],"workspace_id":"integration-ws","review_methods":["external_ai"],"independent_of_principals":["builder"],"independent_of_workspaces":["integration-ws"],"authority_source":"integration-review-authority","target_scope":"exact_candidate_in_workspace"},{"grant_id":"int-freezer","principal_id":"freezer","scopes":["freeze"],"workspace_id":"integration-ws"},{"grant_id":"int-promoter","principal_id":"promoter","scopes":["promote_baseline"],"workspace_id":"integration-ws"},{"grant_id":"int-deployer","principal_id":"deployer","scopes":["deploy","hold_deployment","revoke_deployment"],"workspace_id":"integration-ws"}]}
+          EOF
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install exact frozen Studio and Factory packages
+        run: |
+          python -m pip install -e 'studio-frozen[test]'
+          python -m pip install -e factory/candidate_v1_11
+
+      - name: Prepare controlled-execution image
+        run: docker pull python:3.14-slim
+
+      - name: Start exact frozen Studio API
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd studio-frozen
+          nohup python -m uvicorn ra_agent_studio.api:app --host 127.0.0.1 --port 8000             > "$GITHUB_WORKSPACE/integration-evidence/api-first.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/integration-evidence/api.pid"
+
+      - name: Execute full integration lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python integration-control/integration/run_e2e.py | tee integration-evidence/e2e-console.txt
+
+      - name: Restart API and verify durable state
+        shell: bash
+        run: |
+          set -euo pipefail
+          kill "$(cat integration-evidence/api.pid)"
+          sleep 1
+          cd studio-frozen
+          nohup python -m uvicorn ra_agent_studio.api:app --host 127.0.0.1 --port 8000             > "$GITHUB_WORKSPACE/integration-evidence/api-restart.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/integration-evidence/api-restart.pid"
+          cd "$GITHUB_WORKSPACE"
+          python - <<'PY' | tee integration-evidence/restart-verification.txt
+          import time, httpx
+          for _ in range(60):
+              try:
+                  r=httpx.get("http://127.0.0.1:8000/health",timeout=2)
+                  if r.status_code == 200:
+                      break
+              except Exception:
+                  time.sleep(.5)
+          snapshot=httpx.get("http://127.0.0.1:8000/snapshot",timeout=10).json()
+          assert any(x["baseline_id"]=="integration-baseline-v1" for x in snapshot["baselines"])
+          dep=[x for x in snapshot["deployments"] if x["deployment_id"]=="integration-deployment-v1"][0]
+          assert dep["runtime_standing"]=="STOPPED"
+          assert any(x["current_state"]=="PR-17_RUN_COMPLETE" for x in snapshot["production_runs"])
+          print("DURABLE_RESTART_PASS")
+          PY
+
+      - name: Verify exact integration evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s integration-evidence/E2E_RESULT.json
+          grep -q 'INTEGRATION_E2E_PASS' integration-evidence/e2e-console.txt
+          grep -q 'DURABLE_RESTART_PASS' integration-evidence/restart-verification.txt
+          find factory-output -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > integration-evidence/FACTORY_OUTPUT_MANIFEST.sha256
+          sha256sum integration-evidence/E2E_RESULT.json integration-evidence/ra_agent_studio.db > integration-evidence/INTEGRATION_MANIFEST.sha256
+          printf '%s\n'             'studio_frozen_source=6cd2e99a726893516e31fb8c9c7c4534aa2a46d1'             'studio_frozen_candidate_sha256=046d1a159aae7ace9c1a552f20f37d14b8c19f917d6ab5b027299e1d5acb3929'             'studio_frozen_artifact_id=10541843870'             'factory_frozen_source=bc0568926ef70ea6fa7e5e6cc8287c09e041fb4f'             'factory_frozen_artifact_id=10334979844'             'standing=INTEGRATION_RUNTIME_ACCEPTANCE_PASS'             > integration-evidence/INTEGRATION_IDENTITY.txt
+
+      - name: Upload integration/runtime acceptance evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_v1_04_INTEGRATION_RUNTIME_ACCEPTANCE_EVIDENCE
+          path: |
+            integration-evidence/
+            factory-output/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
