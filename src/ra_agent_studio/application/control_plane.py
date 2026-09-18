@@ -56,22 +56,29 @@ class StudioControlPlane:
             with self.studio.store.transaction():
                 if command.expected_recovery_epoch != self.studio.store.recovery_epoch():
                     raise PermissionError("STALE_RECOVERY_EPOCH")
-                prior=self.studio.store.get_idempotency(command.command_id)
+                prior=self.studio.store.get_idempotency(command.idempotency_key)
                 if prior is not None:
                     if prior["request_sha256"] != request_digest:
-                        raise PermissionError("IDEMPOTENCY_REQUEST_MISMATCH")
+                        raise PermissionError(
+                            "CONFLICTING_REUSE: IdempotencyKey reused for a different logical request"
+                        )
                     result=CommandResult(
                         "REPLAYED",command.command_id,result_ref=prior["result_key"],
-                        payload={"result_kind":prior["result_kind"]},
+                        payload={
+                            "result_kind":prior["result_kind"],
+                            "original_command_id":prior["command_id"],
+                            "idempotency_key":command.idempotency_key,
+                        },
                     )
                 else:
                     result=self._dispatch(command,dict(command.payload))
                     if result.standing == "COMMITTED":
                         self.studio.store._conn.execute(
                             """INSERT INTO idempotency_records(
-                                command_id,request_sha256,result_kind,result_key,recovery_epoch,created_at
-                            ) VALUES(?,?,?,?,?,datetime('now'))""",
+                                idempotency_key,command_id,request_sha256,result_kind,result_key,recovery_epoch,created_at
+                            ) VALUES(?,?,?,?,?,?,datetime('now'))""",
                             (
+                                command.idempotency_key,
                                 command.command_id,
                                 request_digest,
                                 result.payload.get("result_kind","command_result"),
@@ -81,6 +88,7 @@ class StudioControlPlane:
                         )
                         self.studio.store.add_immutable("command_commit",command.command_id,{
                             "command_id":command.command_id,
+                            "idempotency_key":command.idempotency_key,
                             "operation_descriptor_id":command.operation_descriptor_id,
                             "exact_target_ref":command.exact_target_ref,
                             "principal_ref":command.principal_ref,
