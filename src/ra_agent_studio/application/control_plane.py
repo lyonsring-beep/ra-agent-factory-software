@@ -51,6 +51,7 @@ class StudioControlPlane:
             return CommandResult("REJECTED",command.command_id,rejection_reason="UNKNOWN_OPERATION_DESCRIPTOR")
 
         request_digest=self._request_digest(command)
+        result: CommandResult
         try:
             with self.studio.store.transaction():
                 if command.expected_recovery_epoch != self.studio.store.recovery_epoch():
@@ -59,42 +60,78 @@ class StudioControlPlane:
                 if prior is not None:
                     if prior["request_sha256"] != request_digest:
                         raise PermissionError("IDEMPOTENCY_REQUEST_MISMATCH")
-                    return CommandResult(
+                    result=CommandResult(
                         "REPLAYED",command.command_id,result_ref=prior["result_key"],
                         payload={"result_kind":prior["result_kind"]},
                     )
-
-                result=self._dispatch(command,dict(command.payload))
-                if result.standing != "COMMITTED":
-                    return result
-
-                self.studio.store._conn.execute(
-                    """INSERT INTO idempotency_records(
-                        command_id,request_sha256,result_kind,result_key,recovery_epoch,created_at
-                    ) VALUES(?,?,?,?,?,datetime('now'))""",
-                    (
-                        command.command_id,
-                        request_digest,
-                        result.payload.get("result_kind","command_result"),
-                        result.result_ref or "",
-                        self.studio.store.recovery_epoch(),
-                    ),
-                )
-                self.studio.store.add_immutable("command_commit",command.command_id,{
-                    "command_id":command.command_id,
-                    "operation_descriptor_id":command.operation_descriptor_id,
-                    "exact_target_ref":command.exact_target_ref,
-                    "principal_ref":command.principal_ref,
-                    "workspace_ref":command.workspace_ref,
-                    "request_sha256":request_digest,
-                    "result_kind":result.payload.get("result_kind","command_result"),
-                    "result_ref":result.result_ref or "",
-                    "recovery_epoch":self.studio.store.recovery_epoch(),
-                    "atomic_with_authority_mutation":True,
-                })
-                return result
+                else:
+                    result=self._dispatch(command,dict(command.payload))
+                    if result.standing == "COMMITTED":
+                        self.studio.store._conn.execute(
+                            """INSERT INTO idempotency_records(
+                                command_id,request_sha256,result_kind,result_key,recovery_epoch,created_at
+                            ) VALUES(?,?,?,?,?,datetime('now'))""",
+                            (
+                                command.command_id,
+                                request_digest,
+                                result.payload.get("result_kind","command_result"),
+                                result.result_ref or "",
+                                self.studio.store.recovery_epoch(),
+                            ),
+                        )
+                        self.studio.store.add_immutable("command_commit",command.command_id,{
+                            "command_id":command.command_id,
+                            "operation_descriptor_id":command.operation_descriptor_id,
+                            "exact_target_ref":command.exact_target_ref,
+                            "principal_ref":command.principal_ref,
+                            "workspace_ref":command.workspace_ref,
+                            "request_sha256":request_digest,
+                            "result_kind":result.payload.get("result_kind","command_result"),
+                            "result_ref":result.result_ref or "",
+                            "recovery_epoch":self.studio.store.recovery_epoch(),
+                            "atomic_with_authority_mutation":True,
+                        })
         except (ValueError,KeyError,PermissionError,RuntimeError) as exc:
             return CommandResult("REJECTED",command.command_id,rejection_reason=str(exc))
+
+        # External runtime side effects happen only after the durable command/attempt reservation
+        # commits. Provider calls receive that durable attempt id as their idempotency key. A
+        # process crash can therefore be resumed from the same attempt instead of synthesizing
+        # ACTIVE/STOPPED or re-authorizing a new side effect.
+        result_kind=str(result.payload.get("result_kind",""))
+        if result.result_ref and result_kind == "activation_attempt":
+            try:
+                rec=self.studio.execute_activation_attempt(
+                    activation_attempt_id=result.result_ref,
+                    actor_principal_id=command.principal_ref,
+                )
+            except (ValueError,KeyError,PermissionError,RuntimeError) as exc:
+                return CommandResult(
+                    result.standing,command.command_id,result_ref=result.result_ref,
+                    payload={"result_kind":result_kind,"runtime_standing":"ACTIVATING"},
+                    rejection_reason=f"provider execution unresolved: {exc}",
+                )
+            return CommandResult(
+                result.standing,command.command_id,result_ref=result.result_ref,
+                payload={"result_kind":result_kind,"runtime_standing":rec.runtime_standing.value},
+            )
+        if result.result_ref and result_kind == "stop_attempt":
+            try:
+                rec=self.studio.execute_stop_attempt(
+                    stop_attempt_id=result.result_ref,
+                    actor_principal_id=command.principal_ref,
+                )
+            except (ValueError,KeyError,PermissionError,RuntimeError) as exc:
+                return CommandResult(
+                    result.standing,command.command_id,result_ref=result.result_ref,
+                    payload={"result_kind":result_kind,"runtime_standing":"STOPPING"},
+                    rejection_reason=f"provider stop unresolved: {exc}",
+                )
+            return CommandResult(
+                result.standing,command.command_id,result_ref=result.result_ref,
+                payload={"result_kind":result_kind,"runtime_standing":rec.runtime_standing.value},
+            )
+        return result
 
     def _dispatch(self, c: CommandEnvelope, p: dict) -> CommandResult:
         op=c.operation_descriptor_id
@@ -212,21 +249,19 @@ class StudioControlPlane:
             return CommandResult("COMMITTED",c.command_id,rec.deployment_id,{"result_kind":"deployment_authorization"})
 
         if op == "op:deployment:activate-runtime":
-            rec=self.studio.launch_runtime(
+            attempt=self.studio.begin_activation(
                 deployment_id=c.exact_target_ref,actor_principal_id=principal
             )
             return CommandResult(
-                "COMMITTED",c.command_id,rec.deployment_id,
-                {"result_kind":"runtime_activation","runtime_standing":rec.runtime_standing.value},
+                "COMMITTED",c.command_id,attempt,{"result_kind":"activation_attempt"},
             )
 
         if op == "op:deployment:stop-runtime":
-            rec=self.studio.stop_runtime(
+            attempt=self.studio.begin_stop_runtime(
                 deployment_id=c.exact_target_ref,actor_principal_id=principal
             )
             return CommandResult(
-                "COMMITTED",c.command_id,rec.deployment_id,
-                {"result_kind":"runtime_stop","runtime_standing":rec.runtime_standing.value},
+                "COMMITTED",c.command_id,attempt,{"result_kind":"stop_attempt"},
             )
 
         if op == "op:deployment:revoke-deployment-grant":
