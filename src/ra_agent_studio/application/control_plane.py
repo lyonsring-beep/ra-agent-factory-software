@@ -115,4 +115,16 @@ class StudioControlPlane:
         if op == "op:deployment:place-safety-hold":
             rec=self.studio.place_safety_hold(deployment_id=c.exact_target_ref,actor_principal_id=principal)
             return CommandResult("COMMITTED",c.command_id,rec.deployment_id,{"result_kind":"deployment_hold"})
+        if op == "op:deployment:remove-safety-hold":
+            rec=self.studio.revalidate_deployment(
+                deployment_id=c.exact_target_ref,actor_principal_id=principal,
+                continue_active=bool(p.get("continue_active",False)),
+            )
+            return CommandResult("COMMITTED",c.command_id,rec.deployment_id,{"result_kind":"deployment_hold_removed_revalidated"})
+        if op == "op:deployment:revalidate-deployment":
+            rec=self.studio.revalidate_deployment(
+                deployment_id=c.exact_target_ref,actor_principal_id=principal,
+                continue_active=bool(p.get("continue_active",False)),
+            )
+            return CommandResult("COMMITTED",c.command_id,rec.deployment_id,{"result_kind":"deployment_revalidation"})
         return CommandResult("REJECTED",c.command_id,rejection_reason="OPERATION_NOT_PROJECTED_BY_STUDIO")
