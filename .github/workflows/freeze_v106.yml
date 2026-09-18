@@ -1,0 +1,106 @@
+name: Freeze RA Agent Studio implementation v1.06
+
+on:
+  push:
+    branches: [software-freeze-v1_06]
+    paths:
+      - '.github/workflows/freeze_v106.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  freeze:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify exact approved source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "119650199189952b0d27468aab5f2c8753baedc2"
+          echo "EXACT_APPROVED_SOURCE_COMMIT_PASS"
+
+      - name: Download exact externally approved Candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06
+          path: approved-candidate
+          repository: lyonsring-beep/ra-agent-factory-software
+          run-id: 35347172421
+          github-token: ${{ github.token }}
+
+      - name: Verify exact approved Candidate identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find approved-candidate -type f -name 'RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip' | head -n1)
+          test -n "$ZIP"
+          SHA=$(sha256sum "$ZIP" | awk '{print $1}')
+          SIZE=$(stat -c '%s' "$ZIP")
+          test "$SHA" = "aa3d211f042a047425e473dbe7b339d919d653070b9fbb5b92f6fddd10116c5d"
+          test "$SIZE" = "142936"
+          unzip -t "$ZIP"
+          echo "EXACT_APPROVED_CANDIDATE_IDENTITY_PASS"
+
+      - name: Create mechanical non-mutating Frozen package
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN
+          mkdir -p "$OUT"
+          ZIP=$(find approved-candidate -type f -name 'RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip' | head -n1)
+          cp "$ZIP" "$OUT/RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip"
+
+          cat > "$OUT/FREEZE_ATTESTATION.txt" <<'EOF'
+          product=RA Agent Studio
+          version=v1.06
+          standing=SOFTWARE_FROZEN
+          freeze_type=MECHANICAL_NON_MUTATING
+          external_review=RA_AGENT_STUDIO_v1_06_TARGETED_IMPLEMENTATION_REREVIEW_v1_02_PASS
+          external_review_verdict=PASS_ZERO_BLOCKERS
+          source_commit=119650199189952b0d27468aab5f2c8753baedc2
+          candidate_sha256=aa3d211f042a047425e473dbe7b339d919d653070b9fbb5b92f6fddd10116c5d
+          candidate_size=142936
+          candidate_packaging_run=35347172421
+          candidate_artifact_id=10547412640
+          implementation_mutation=NO
+          architecture_reopen=NO
+          factory_reopen=NO
+          accepted_v105_surfaces_reopen=NO
+          next_gate=WINDOWS_NATIVE_SYSTEM_ACCEPTANCE
+          EOF
+
+          (cd "$OUT" && sha256sum RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip FREEZE_ATTESTATION.txt > FROZEN_MANIFEST.sha256)
+          zip -X -r RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.zip "$OUT" >/dev/null
+          unzip -t RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.zip
+          sha256sum RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.sha256
+          stat -c '%s' RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.zip | tee RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.size
+
+      - name: Re-verify embedded Candidate is byte-identical
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf verify-frozen
+          mkdir verify-frozen
+          unzip -q RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.zip -d verify-frozen
+          SHA=$(sha256sum verify-frozen/RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN/RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip | awk '{print $1}')
+          SIZE=$(stat -c '%s' verify-frozen/RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN/RA_AGENT_STUDIO_IMPLEMENTATION_CANDIDATE_v1_06.zip)
+          test "$SHA" = "aa3d211f042a047425e473dbe7b339d919d653070b9fbb5b92f6fddd10116c5d"
+          test "$SIZE" = "142936"
+          echo "MECHANICAL_FREEZE_BYTE_IDENTITY_PASS"
+
+      - name: Upload Frozen v1.06
+        uses: actions/upload-artifact@v4
+        with:
+          name: RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN
+          path: |
+            RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.zip
+            RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.sha256
+            RA_AGENT_STUDIO_IMPLEMENTATION_v1_06_FROZEN.size
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 90
