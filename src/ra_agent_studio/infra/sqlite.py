@@ -25,6 +25,8 @@ class SQLiteStateStore:
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._lock = RLock()
+        self._transaction_depth = 0
+        self._savepoint_seq = 0
         self._initialize()
 
     def _initialize(self) -> None:
@@ -104,14 +106,31 @@ class SQLiteStateStore:
     @contextmanager
     def transaction(self) -> Iterator["SQLiteStateStore"]:
         with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE")
+            outer = self._transaction_depth == 0
+            savepoint = ""
+            if outer:
+                self._conn.execute("BEGIN IMMEDIATE")
+            else:
+                self._savepoint_seq += 1
+                savepoint = f"ra_studio_sp_{self._savepoint_seq}"
+                self._conn.execute(f"SAVEPOINT {savepoint}")
+            self._transaction_depth += 1
             try:
                 yield self
             except BaseException:
-                self._conn.execute("ROLLBACK")
+                self._transaction_depth -= 1
+                if outer:
+                    self._conn.execute("ROLLBACK")
+                else:
+                    self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
                 raise
             else:
-                self._conn.execute("COMMIT")
+                self._transaction_depth -= 1
+                if outer:
+                    self._conn.execute("COMMIT")
+                else:
+                    self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
 
     @staticmethod
     def _encode(payload: dict) -> str:
