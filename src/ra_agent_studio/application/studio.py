@@ -17,7 +17,7 @@ from ra_agent_studio.domain.review import ReviewBlocker, ReviewRecord, ReviewVer
 from ra_agent_studio.domain.production import ProductionEvent, ProductionRunRecord, ProductionState, transition as transition_production
 from ra_agent_studio.domain.deployment import DeploymentAuthorityRecord, DeploymentGrantStanding, GrantEvent, RuntimeDeploymentStanding, RuntimeEvent, RuntimeRealizationSnapshot, grant_next, runtime_next
 from ra_agent_studio.domain.failure_routing import CandidateMutationStanding, FailureClass, ProductionStage, route_failure
-from ra_agent_studio.infra.execution import IsolatedPythonProcessExecutor
+from ra_agent_studio.infra.execution import ControlledExecutor, default_controlled_executor
 from ra_agent_studio.infra.factory import FACTORY_V111_RUNTIME_IDENTITY, FactoryRuntime, SubprocessFactoryRuntime
 from ra_agent_studio.infra.sqlite import SQLiteStateStore
 from ra_agent_studio.infra.runtime import RuntimeLauncher, SubprocessRuntimeLauncher
@@ -36,13 +36,13 @@ class StudioService:
         db_path: str | None = None,
         authority_registry: AuthorityRegistry | None = None,
         factory_runtime: FactoryRuntime | None = None,
-        sandbox_executor: IsolatedPythonProcessExecutor | None = None,
+        sandbox_executor: ControlledExecutor | None = None,
         runtime_launcher: RuntimeLauncher | None = None,
     ) -> None:
         self.store = SQLiteStateStore(db_path or os.environ.get("RA_STUDIO_DB_PATH", "ra_agent_studio.db"))
         self.authority = authority_registry or AuthorityRegistry.from_environment()
         self.factory_runtime = factory_runtime
-        self.sandbox_executor = sandbox_executor or IsolatedPythonProcessExecutor()
+        self.sandbox_executor = sandbox_executor or default_controlled_executor()
         self.runtime_launcher = runtime_launcher
 
     @staticmethod
