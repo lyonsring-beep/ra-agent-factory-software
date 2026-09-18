@@ -130,7 +130,12 @@ class StudioService:
             "factory_candidate_sha256": item.factory_candidate_sha256,
             "author_principal_id": item.author_principal_id,
             "contributor_principal_ids": sorted(item.contributor_principal_ids),
+            "contributor_workspace_ids": sorted(item.contributor_workspace_ids),
             "workspace_id": item.workspace_id,
+            "artifact_blob_hash": item.artifact_blob_hash.value if item.artifact_blob_hash else None,
+            "logical_payload_identity": item.logical_payload_identity.value if item.logical_payload_identity else None,
+            "manifest_identity": item.manifest_identity.value if item.manifest_identity else None,
+            "factory_candidate_revision_id": item.factory_candidate_revision_id,
             "lineage_id": item.lineage_id.value,
             "predecessor_baseline_id": item.predecessor_baseline_id.value if item.predecessor_baseline_id else None,
         }
@@ -147,7 +152,12 @@ class StudioService:
             factory_candidate_sha256=data["factory_candidate_sha256"],
             author_principal_id=data["author_principal_id"],
             contributor_principal_ids=frozenset(data["contributor_principal_ids"]),
+            contributor_workspace_ids=frozenset(data.get("contributor_workspace_ids", [data["workspace_id"]])),
             workspace_id=data["workspace_id"],
+            artifact_blob_hash=ContentHash(data["artifact_blob_hash"]) if data.get("artifact_blob_hash") else None,
+            logical_payload_identity=ContentHash(data["logical_payload_identity"]) if data.get("logical_payload_identity") else None,
+            manifest_identity=ContentHash(data["manifest_identity"]) if data.get("manifest_identity") else None,
+            factory_candidate_revision_id=data.get("factory_candidate_revision_id", ""),
             lineage_id=LineageId(data["lineage_id"]),
             predecessor_baseline_id=BaselineId(data["predecessor_baseline_id"]) if data.get("predecessor_baseline_id") else None,
         )
@@ -159,10 +169,12 @@ class StudioService:
             "subject_candidate_id": item.subject_candidate_id.value,
             "subject_hash": item.subject_hash.value,
             "reviewer_principal_id": item.reviewer_principal_id,
+            "reviewer_workspace_id": item.reviewer_workspace_id,
             "authority_grant_id": item.authority_grant_id,
+            "authority_source": item.authority_source,
             "review_method": item.review_method,
             "scope": item.scope,
-            "workspace_id": item.workspace_id,
+            "target_workspace_id": item.target_workspace_id,
             "verdict": item.verdict.value,
             "blockers": [{"blocker_id": b.blocker_id, "description": b.description, "closed": b.closed} for b in item.blockers],
         }
@@ -174,10 +186,12 @@ class StudioService:
             subject_candidate_id=CandidateId(data["subject_candidate_id"]),
             subject_hash=ContentHash(data["subject_hash"]),
             reviewer_principal_id=data["reviewer_principal_id"],
+            reviewer_workspace_id=data.get("reviewer_workspace_id", "legacy-unknown"),
             authority_grant_id=data["authority_grant_id"],
+            authority_source=data.get("authority_source", "legacy-unknown"),
             review_method=data["review_method"],
             scope=data["scope"],
-            workspace_id=data["workspace_id"],
+            target_workspace_id=data.get("target_workspace_id", data.get("workspace_id", "")),
             verdict=ReviewVerdict(data["verdict"]),
             blockers=tuple(ReviewBlocker(**b) for b in data.get("blockers", [])),
         )
@@ -360,8 +374,14 @@ class StudioService:
             factory_evidence_hash=result.factory_evidence_hash,
         )
         contributors = {actor_principal_id}
+        contributor_workspaces = {self.authority.principal(actor_principal_id).workspace_id}
         for binding in composition.bindings:
-            contributors.add(self.get_module(binding.revision_id.value).author_principal_id)
+            author_id = self.get_module(binding.revision_id.value).author_principal_id
+            contributors.add(author_id)
+            try:
+                contributor_workspaces.add(self.authority.principal(author_id).workspace_id)
+            except PermissionError:
+                contributor_workspaces.add(workspace_id)
         candidate = CandidateRecord(
             candidate_id=CandidateId(f"candidate-{result.artifact_hash.value[:24]}"),
             candidate_hash=result.artifact_hash,
@@ -372,6 +392,7 @@ class StudioService:
             factory_candidate_sha256=result.factory_candidate_sha256,
             author_principal_id=actor_principal_id,
             contributor_principal_ids=frozenset(contributors),
+            contributor_workspace_ids=frozenset(contributor_workspaces),
             workspace_id=workspace_id,
             lineage_id=LineageId(lineage_id),
             predecessor_baseline_id=BaselineId(predecessor_baseline_id) if predecessor_baseline_id else None,
@@ -414,10 +435,11 @@ class StudioService:
             workspace_id=candidate.workspace_id,
             review_method=review_method,
         )
+        reviewer = self.authority.principal(reviewer_principal_id)
         record = create_review_record(
             review_id=f"review-{uuid4().hex}",
             candidate=candidate,
-            reviewer_principal_id=reviewer_principal_id,
+            reviewer=reviewer,
             authority_grant=grant,
             review_method=review_method,
             verdict=ReviewVerdict.PASS if passed else ReviewVerdict.FAIL,
