@@ -1180,11 +1180,33 @@ class StudioService:
                 return rec
             raise ValueError("activation outcome must be ACTIVATED, FAILED, or AMBIGUOUS")
 
-    def activate_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
-        attempt_id=self.begin_activation(deployment_id=deployment_id,actor_principal_id=actor_principal_id)
+    def launch_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
+        launcher=self.runtime_launcher or SubprocessRuntimeLauncher.from_environment()
+        attempt_id=self.begin_activation(
+            deployment_id=deployment_id,actor_principal_id=actor_principal_id
+        )
+        rec=self._deployment_from(self.store.get("deployment",deployment_id))
+        realization=self.store.get_immutable("runtime_realization",rec.realization_snapshot_id)
+        try:
+            external=launcher.launch(deployment_id=deployment_id,realization=realization)
+        except BaseException as exc:
+            return self.reconcile_activation(
+                activation_attempt_id=attempt_id,
+                actor_principal_id=actor_principal_id,
+                outcome="AMBIGUOUS",
+                failure_reason=f"runtime provider exception: {type(exc).__name__}: {exc}",
+            )
         return self.reconcile_activation(
-            activation_attempt_id=attempt_id,actor_principal_id=actor_principal_id,
-            outcome="ACTIVATED",external_runtime_identity=f"studio-runtime:{uuid4().hex}",
+            activation_attempt_id=attempt_id,
+            actor_principal_id=actor_principal_id,
+            outcome=external.standing,
+            external_runtime_identity=external.external_runtime_identity,
+            failure_reason=external.detail,
+        )
+
+    def activate_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
+        raise PermissionError(
+            "synthetic activation is disabled; use the authoritative control plane runtime launcher"
         )
 
     def place_safety_hold(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
@@ -1274,20 +1296,86 @@ class StudioService:
         return rec
 
     def stop_runtime(self, *, deployment_id: str, actor_principal_id: str) -> DeploymentAuthorityRecord:
+        launcher=self.runtime_launcher or SubprocessRuntimeLauncher.from_environment()
         rec=self._deployment_from(self.store.get("deployment",deployment_id))
         freeze=self._freeze_from(self.store.get("freeze",rec.frozen_artifact_id))
-        candidate=self._candidate_from(self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value))
-        self.authority.require_grant(actor_principal_id,AuthorityScope.DEPLOY,workspace_id=candidate.workspace_id)
+        candidate=self._candidate_from(
+            self.store.get("candidate",freeze.frozen_artifact.source_candidate_id.value)
+        )
+        self.authority.require_grant(
+            actor_principal_id,AuthorityScope.DEPLOY,workspace_id=candidate.workspace_id
+        )
+        if not rec.activation_result_ref:
+            raise PermissionError("runtime stop requires a confirmed external activation result")
+        activation=self.store.get_immutable("activation_result",rec.activation_result_ref)
+        external_runtime_identity=str(activation.get("external_runtime_identity",""))
+        if not external_runtime_identity:
+            raise PermissionError("runtime stop requires exact external runtime identity")
+
+        stop_attempt_id=f"stop-attempt:{uuid4().hex}"
         with self.store.transaction():
             rec=self._deployment_from(self.store.get("deployment",deployment_id))
             stopping=runtime_next(rec.runtime_standing,RuntimeEvent.STOP_REQUESTED)
             rec=replace(rec,runtime_standing=stopping)
             self._save_deployment(rec)
-            stopped=runtime_next(rec.runtime_standing,RuntimeEvent.STOPPED)
-            rec=replace(rec,runtime_standing=stopped)
-            self._save_deployment(rec)
-            self._audit(actor_principal_id,"runtime_stopped","deployment",deployment_id,{})
-        return rec
+            self.store.add("stop_attempt",stop_attempt_id,{
+                "stop_attempt_id":stop_attempt_id,
+                "deployment_id":deployment_id,
+                "external_runtime_identity":external_runtime_identity,
+                "standing":"PENDING_EXTERNAL_RESULT",
+                "recovery_epoch":self.store.recovery_epoch(),
+                "detail":"",
+            })
+            self._audit(actor_principal_id,"runtime_stop_requested","deployment",deployment_id,{
+                "stop_attempt_id":stop_attempt_id,
+                "external_runtime_identity":external_runtime_identity,
+            })
+
+        try:
+            external=launcher.stop(
+                deployment_id=deployment_id,
+                external_runtime_identity=external_runtime_identity,
+            )
+        except BaseException as exc:
+            external_standing="AMBIGUOUS"
+            external_detail=f"runtime provider exception: {type(exc).__name__}: {exc}"
+        else:
+            external_standing=external.standing
+            external_detail=external.detail
+
+        with self.store.transaction():
+            rec=self._deployment_from(self.store.get("deployment",deployment_id))
+            attempt=self.store.get("stop_attempt",stop_attempt_id)
+            if external_standing == "STOPPED":
+                stopped=runtime_next(rec.runtime_standing,RuntimeEvent.STOPPED)
+                rec=replace(rec,runtime_standing=stopped)
+                self._save_deployment(rec)
+                self.store.put("stop_attempt",stop_attempt_id,{
+                    **attempt,"standing":"STOPPED","detail":external_detail,
+                })
+                self.store.add_immutable("stop_result",f"stop-result:{uuid4().hex}",{
+                    "stop_attempt_id":stop_attempt_id,
+                    "deployment_id":deployment_id,
+                    "external_runtime_identity":external_runtime_identity,
+                    "standing":"STOPPED",
+                    "detail":external_detail,
+                    "recovery_epoch":self.store.recovery_epoch(),
+                })
+                self._audit(actor_principal_id,"runtime_stopped","deployment",deployment_id,{
+                    "stop_attempt_id":stop_attempt_id,
+                    "external_runtime_identity":external_runtime_identity,
+                })
+                return rec
+            standing="AMBIGUOUS" if external_standing == "AMBIGUOUS" else "FAILED"
+            self.store.put("stop_attempt",stop_attempt_id,{
+                **attempt,"standing":standing,"detail":external_detail,
+            })
+            self._audit(actor_principal_id,"runtime_stop_unresolved","deployment",deployment_id,{
+                "stop_attempt_id":stop_attempt_id,
+                "provider_standing":standing,
+                "detail":external_detail,
+            })
+            return rec
 
     def deploy(self, *, deployment_id: str, frozen_artifact_id: str, actor_principal_id: str):
         raise PermissionError("direct deploy/activate is disabled; authorize deployment with exact runtime snapshots then activate separately")
