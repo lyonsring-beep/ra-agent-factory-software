@@ -138,11 +138,14 @@ def test_authoritative_records_survive_restart(tmp_path: Path) -> None:
         expected_predecessor_baseline_id=None,
         actor_principal_id="promoter",
     )
-    first.deploy(
-        deployment_id="d1",
-        frozen_artifact_id=freeze.frozen_artifact.id.value,
-        actor_principal_id="deployer",
+    first.authorize_deployment(
+        deployment_id="d1", frozen_artifact_id=freeze.frozen_artifact.id.value,
+        actor_principal_id="deployer", runtime_profile={"runtime":"python-3.14"},
+        environment={"env":"test"}, provider_binding={"provider":"test"}, secret_scope={},
+        permission_scope={"permissions":[]}, policy={"authority_boundary":{"network":False}},
+        runtime_boundary={"network":False},
     )
+    first.activate_runtime(deployment_id="d1", actor_principal_id="deployer")
     first.store.close()
 
     second = StudioService(
@@ -153,7 +156,7 @@ def test_authoritative_records_survive_restart(tmp_path: Path) -> None:
     assert snapshot["freezes"][0]["frozen_artifact_id"] == freeze.frozen_artifact.id.value
     assert snapshot["baselines"][0]["baseline_id"] == baseline.baseline_id.value
     assert snapshot["deployments"][0]["deployment_id"] == "d1"
-    assert any(event["action"] == "deployment_activated" for event in snapshot["audit"])
+    assert any(event["action"] == "runtime_activated" for event in snapshot["audit"])
 
 
 def test_effect_sandbox_executes_real_module_and_computes_delta(tmp_path: Path) -> None:
@@ -213,18 +216,28 @@ def test_freeze_promotion_and_deployment_are_distinct_authority_transitions(tmp_
         expected_predecessor_baseline_id="b1",
         actor_principal_id="promoter",
     )
-    with pytest.raises(PermissionError, match="activation-time current baseline"):
-        service.deploy(
-            deployment_id="d-old",
-            frozen_artifact_id=f1.frozen_artifact.id.value,
-            actor_principal_id="deployer",
+    with pytest.raises(PermissionError, match="not canonical current baseline"):
+        service.authorize_deployment(
+            deployment_id="d-old", frozen_artifact_id=f1.frozen_artifact.id.value,
+            actor_principal_id="deployer", runtime_profile={"runtime":"python"},
+            environment={"env":"test"}, provider_binding={"provider":"test"}, secret_scope={},
+            permission_scope={"permissions":[]}, policy={"authority_boundary":{"network":False}},
+            runtime_boundary={"network":False},
         )
-    deployment = service.deploy(
-        deployment_id="d-current",
-        frozen_artifact_id=f2.frozen_artifact.id.value,
-        actor_principal_id="deployer",
+    deployment = service.authorize_deployment(
+        deployment_id="d-current", frozen_artifact_id=f2.frozen_artifact.id.value,
+        actor_principal_id="deployer", runtime_profile={"runtime":"python"},
+        environment={"env":"test"}, provider_binding={"provider":"test"}, secret_scope={},
+        permission_scope={"permissions":[]}, policy={"authority_boundary":{"network":False}},
+        runtime_boundary={"network":False},
     )
-    assert deployment.baseline_id.value == "b2"
+    deployment = service.activate_runtime(deployment_id="d-current", actor_principal_id="deployer")
+    assert deployment.baseline_id == "b2"
+    assert deployment.runtime_standing.value == "ACTIVE"
+    held = service.place_safety_hold(deployment_id="d-current", actor_principal_id="deployer")
+    assert held.safety_hold is True
+    revoked = service.revoke_deployment(deployment_id="d-current", actor_principal_id="deployer", reason="test revoke")
+    assert revoked.grant_standing.value == "REVOKED"
 
 
 def test_same_target_review_requires_workspace_independence(tmp_path: Path) -> None:
